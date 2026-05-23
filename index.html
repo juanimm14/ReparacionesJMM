@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Reparaciones JMM</title>
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, orderBy }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAgQZt77P3QPiCRvM0pAbzu367t_FLiP4g",
+  authDomain: "reparacionesjmm.firebaseapp.com",
+  projectId: "reparacionesjmm",
+  storageBucket: "reparacionesjmm.firebasestorage.app",
+  messagingSenderId: "1035242845088",
+  appId: "1:1035242845088:web:04c9d09bd52f54f66e2ac5"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+// ── Estado global ─────────────────────────────────────────
+let allRecords = [];
+let editingId  = null;
+
+// ── Helpers ───────────────────────────────────────────────
+function $(id){ return document.getElementById(id); }
+
+function fmtMoney(n){
+  if(!n && n!==0) return "-";
+  return "$" + Number(n).toLocaleString("es-AR");
+}
+
+function badgeEstado(v){
+  const map = {
+    "Retirado":"badge-retirado","Reparado":"badge-reparado",
+    "Pendiente":"badge-pendiente","pendiente":"badge-pendiente",
+    "-":"badge-neutro","No acepto presupuesto":"badge-rechazo",
+    "Pagado":"badge-pagado"
+  };
+  const cls = map[v] || "badge-neutro";
+  return `<span class="badge ${cls}">${v||"-"}</span>`;
+}
+
+function badgePago(v){
+  const upper = (v||"").toUpperCase();
+  if(upper==="PAGADO") return `<span class="badge badge-pagado">${v}</span>`;
+  if(upper==="PENDIENTE") return `<span class="badge badge-pendiente">${v}</span>`;
+  return `<span class="badge badge-neutro">${v||"-"}</span>`;
+}
+
+// ── Cargar desde Firestore ────────────────────────────────
+async function loadRecords(){
+  showLoading(true);
+  try{
+    const snap = await getDocs(collection(db,"reparaciones"));
+    allRecords = [];
+    snap.forEach(d=> allRecords.push({id:d.id,...d.data()}));
+    // sort by fechaRecibido desc (string dd/mm/yyyy)
+    allRecords.sort((a,b)=>{
+      const pa = parseDate(a.fechaRecibido);
+      const pb = parseDate(b.fechaRecibido);
+      return pb - pa;
+    });
+    renderTable(allRecords);
+    updateStats(allRecords);
+  }catch(e){
+    showToast("Error al cargar: "+e.message,"error");
+  }
+  showLoading(false);
+}
+
+function parseDate(s){
+  if(!s) return 0;
+  const [d,m,y] = s.split("/");
+  return new Date(y,m-1,d).getTime();
+}
+
+// ── Renderizar tabla ──────────────────────────────────────
+function renderTable(records){
+  const tbody = $("tbody");
+  tbody.innerHTML = "";
+  if(!records.length){
+    tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`;
+    return;
+  }
+  records.forEach(r=>{
+    const tr = document.createElement("tr");
+    tr.innerHTML=`
+      <td class="col-detalle">${r.detalle||"-"}</td>
+      <td class="col-trabajo">${r.trabajo||"-"}</td>
+      <td class="col-num">${fmtMoney(r.gastosRepuestos)}</td>
+      <td class="col-num">${fmtMoney(r.precioUnitario)}</td>
+      <td class="col-num">${r.cantidad||1}</td>
+      <td>${r.cliente||"-"}</td>
+      <td>${badgeEstado(r.estado)}</td>
+      <td class="col-fecha">${r.fechaRecibido||"-"}</td>
+      <td class="col-fecha">${r.fechaRetiro||"-"}</td>
+      <td>${badgePago(r.estadoPago)}</td>
+      <td class="col-num"><strong>${fmtMoney(r.total)}</strong></td>
+      <td class="col-acciones">
+        <button class="btn-icon btn-edit" onclick="openEdit('${r.id}')" title="Editar">✏️</button>
+        <button class="btn-icon btn-del"  onclick="confirmDelete('${r.id}')" title="Eliminar">🗑️</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Stats ────────────────────────────────────────────────
+function updateStats(records){
+  const total    = records.reduce((s,r)=> s + (Number(r.total)||0), 0);
+  const cobrado  = records.filter(r=> (r.estadoPago||"").toUpperCase()==="PAGADO")
+                          .reduce((s,r)=> s+(Number(r.total)||0),0);
+  const pendCnt  = records.filter(r=> (r.estado||"").toLowerCase()==="pendiente").length;
+  $("stat-total").textContent  = fmtMoney(total);
+  $("stat-cobrado").textContent= fmtMoney(cobrado);
+  $("stat-items").textContent  = records.length;
+  $("stat-pend").textContent   = pendCnt;
+}
+
+// ── Búsqueda / filtro ─────────────────────────────────────
+function applyFilter(){
+  const q    = $("search").value.toLowerCase().trim();
+  const est  = $("filter-estado").value;
+  const pago = $("filter-pago").value;
+  let res = allRecords.filter(r=>{
+    const matchQ = !q || [r.detalle,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
+    const matchE = !est || r.estado===est;
+    const matchP = !pago || (r.estadoPago||"").toUpperCase()===(pago).toUpperCase();
+    return matchQ && matchE && matchP;
+  });
+  renderTable(res);
+  updateStats(res);
+}
+
+// ── Modal form ────────────────────────────────────────────
+function openNew(){
+  editingId=null;
+  $("modal-title").textContent="Nueva Reparación";
+  $("form-rep").reset();
+  $("modal").classList.add("open");
+}
+
+window.openEdit = async function(id){
+  const r = allRecords.find(x=>x.id===id);
+  if(!r) return;
+  editingId = id;
+  $("modal-title").textContent = "Editar Reparación";
+  $("f-detalle").value        = r.detalle||"";
+  $("f-trabajo").value        = r.trabajo||"";
+  $("f-gastos").value         = r.gastosRepuestos||0;
+  $("f-precio").value         = r.precioUnitario||0;
+  $("f-cantidad").value       = r.cantidad||1;
+  $("f-cliente").value        = r.cliente||"";
+  $("f-estado").value         = r.estado||"";
+  $("f-fRec").value           = toInputDate(r.fechaRecibido);
+  $("f-fRet").value           = toInputDate(r.fechaRetiro);
+  $("f-pago").value           = normalizePago(r.estadoPago);
+  $("f-total").value          = r.total||0;
+  $("modal").classList.add("open");
+}
+
+function toInputDate(s){
+  if(!s) return "";
+  const [d,m,y] = s.split("/");
+  if(!d||!m||!y) return "";
+  return `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
+}
+function fromInputDate(s){
+  if(!s) return "";
+  const [y,m,d] = s.split("-");
+  return `${d}/${m}/${y}`;
+}
+function normalizePago(v){
+  const u=(v||"").toUpperCase();
+  if(u==="PAGADO"||u==="PAGADO ") return "PAGADO";
+  if(u==="PENDIENTE") return "Pendiente";
+  return v||"";
+}
+
+function closeModal(){
+  $("modal").classList.remove("open");
+}
+
+async function saveRecord(){
+  const data = {
+    detalle:         $("f-detalle").value.trim(),
+    trabajo:         $("f-trabajo").value.trim(),
+    gastosRepuestos: Number($("f-gastos").value)||0,
+    precioUnitario:  Number($("f-precio").value)||0,
+    cantidad:        Number($("f-cantidad").value)||1,
+    cliente:         $("f-cliente").value.trim(),
+    estado:          $("f-estado").value,
+    fechaRecibido:   fromInputDate($("f-fRec").value),
+    fechaRetiro:     fromInputDate($("f-fRet").value),
+    estadoPago:      $("f-pago").value,
+    total:           Number($("f-total").value)||0,
+  };
+  if(!data.detalle){ showToast("El detalle es obligatorio","error"); return; }
+  try{
+    if(editingId){
+      await updateDoc(doc(db,"reparaciones",editingId), data);
+      showToast("Registro actualizado ✔","ok");
+    } else {
+      await addDoc(collection(db,"reparaciones"), data);
+      showToast("Registro guardado ✔","ok");
+    }
+    closeModal();
+    loadRecords();
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+window.confirmDelete = function(id){
+  if(confirm("¿Eliminar este registro?")) deleteRecord(id);
+}
+async function deleteRecord(id){
+  try{
+    await deleteDoc(doc(db,"reparaciones",id));
+    showToast("Eliminado","ok");
+    loadRecords();
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+// ── Importar Excel ────────────────────────────────────────
+async function importExcel(){
+  const file = $("import-file").files[0];
+  if(!file){ showToast("Seleccioná un archivo xlsx","error"); return; }
+
+  // Load SheetJS dynamically
+  if(!window.XLSX){
+    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+  }
+
+  const reader = new FileReader();
+  reader.onload = async function(e){
+    try{
+      const wb   = XLSX.read(e.target.result, {type:"array"});
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
+
+      if(rows.length < 2){ showToast("El archivo está vacío","error"); return; }
+
+      // Expect header in row 0
+      const header = rows[0].map(h=> (h||"").toString().toLowerCase());
+      const idx = {
+        detalle:         findCol(header,["detalle"]),
+        trabajo:         findCol(header,["trabajo realizado"]),
+        gastosRepuestos: findCol(header,["gastos repuestos","gastos"]),
+        precioUnitario:  findCol(header,["$ x unidad","precio","unitario"]),
+        cantidad:        findCol(header,["cantidad"]),
+        cliente:         findCol(header,["cliente"]),
+        estado:          findCol(header,["estado"]),
+        fechaRecibido:   findCol(header,["fecha recibido","recibido"]),
+        fechaRetiro:     findCol(header,["fecha retiro","retiro"]),
+        estadoPago:      findCol(header,["estado pago","pago"]),
+        total:           findCol(header,["total"]),
+      };
+
+      const records = [];
+      for(let i=1;i<rows.length;i++){
+        const row = rows[i];
+        const detalle = (row[idx.detalle]||"").toString().trim();
+        const cliente = (row[idx.cliente]||"").toString().trim();
+        if(!detalle && !cliente) continue;
+
+        records.push({
+          detalle,
+          trabajo:         (row[idx.trabajo]||"").toString().trim(),
+          gastosRepuestos: toNum(row[idx.gastosRepuestos]),
+          precioUnitario:  toNum(row[idx.precioUnitario]),
+          cantidad:        toNum(row[idx.cantidad]) || 1,
+          cliente,
+          estado:          (row[idx.estado]||"").toString().trim(),
+          fechaRecibido:   xlDateToStr(row[idx.fechaRecibido]),
+          fechaRetiro:     xlDateToStr(row[idx.fechaRetiro]),
+          estadoPago:      (row[idx.estadoPago]||"").toString().trim(),
+          total:           toNum(row[idx.total]),
+        });
+      }
+
+      if(!records.length){ showToast("No se encontraron filas válidas","error"); return; }
+
+      if(!confirm(`Se importarán ${records.length} registros. ¿Continuar?`)) return;
+
+      showLoading(true);
+      let ok=0, err=0;
+      for(const r of records){
+        try{ await addDoc(collection(db,"reparaciones"),r); ok++; }
+        catch(ex){ err++; }
+      }
+      showLoading(false);
+      $("import-file").value="";
+      showToast(`Importados: ${ok}  —  Errores: ${err}`,"ok");
+      loadRecords();
+    }catch(ex){
+      showLoading(false);
+      showToast("Error al leer el archivo: "+ex.message,"error");
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function findCol(header, candidates){
+  for(const c of candidates){
+    const i = header.indexOf(c);
+    if(i>=0) return i;
+  }
+  // partial match
+  for(const c of candidates){
+    const i = header.findIndex(h=> h.includes(c));
+    if(i>=0) return i;
+  }
+  return -1;
+}
+
+function toNum(v){
+  if(v===null||v===undefined||v==="") return 0;
+  const n = Number(v);
+  return isNaN(n) ? 0 : n;
+}
+
+function xlDateToStr(v){
+  if(!v && v!==0) return "";
+  // If already a string like dd/mm/yyyy
+  if(typeof v === "string"){
+    if(v.includes("/")) return v;
+    const n = Number(v);
+    if(isNaN(n)) return v;
+    v = n;
+  }
+  if(typeof v === "number" && v > 1000){
+    // Excel serial date
+    const d = new Date(Math.round((v - 25569)*86400*1000));
+    const dd = String(d.getUTCDate()).padStart(2,"0");
+    const mm = String(d.getUTCMonth()+1).padStart(2,"0");
+    const yyyy = d.getUTCFullYear();
+    return `${dd}/${mm}/${yyyy}`;
+  }
+  return "";
+}
+
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const s=document.createElement("script");
+    s.src=src; s.onload=res; s.onerror=rej;
+    document.head.appendChild(s);
+  });
+}
+
+// ── UI helpers ────────────────────────────────────────────
+function showLoading(v){
+  $("loading").style.display = v?"flex":"none";
+}
+function showToast(msg,type){
+  const t=$("toast");
+  t.textContent=msg;
+  t.className="toast "+(type==="error"?"toast-error":"toast-ok");
+  t.style.display="block";
+  setTimeout(()=>t.style.display="none",3500);
+}
+
+// ── Auto-calcular total ───────────────────────────────────
+function autoTotal(){
+  const precio = Number($("f-precio").value)||0;
+  const cant   = Number($("f-cantidad").value)||1;
+  $("f-total").value = precio * cant;
+}
+
+// ── Export CSV ────────────────────────────────────────────
+function exportCSV(){
+  const headers = ["Detalle","Trabajo realizado","Gastos repuestos","$ x unidad","Cantidad","Cliente","Estado","Fecha recibido","Fecha retiro","Estado Pago","Total"];
+  const rows = allRecords.map(r=>[
+    r.detalle,r.trabajo,r.gastosRepuestos,r.precioUnitario,r.cantidad,
+    r.cliente,r.estado,r.fechaRecibido,r.fechaRetiro,r.estadoPago,r.total
+  ].map(v=> `"${(v||"").toString().replace(/"/g,'""')}"`).join(","));
+  const csv = [headers.join(","),...rows].join("\n");
+  const a = document.createElement("a");
+  a.href = "data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);
+  a.download = "reparaciones_export.csv";
+  a.click();
+}
+
+// ── Login ────────────────────────────────────────────────
+const PASSWORD = "JMM2025";
+const SESSION_KEY = "jmm_auth";
+
+function checkAuth(){
+  return sessionStorage.getItem(SESSION_KEY) === "ok";
+}
+
+function doLogin(){
+  const val = $("login-input").value;
+  if(val === PASSWORD){
+    sessionStorage.setItem(SESSION_KEY,"ok");
+    $("login-screen").style.display = "none";
+    $("app").style.display = "block";
+    initApp();
+  } else {
+    $("login-error").style.display = "block";
+    $("login-input").value = "";
+    $("login-input").focus();
+    setTimeout(()=>{ $("login-error").style.display="none"; }, 2500);
+  }
+}
+
+function initApp(){
+  loadRecords();
+  $("search").addEventListener("input", applyFilter);
+  $("filter-estado").addEventListener("change", applyFilter);
+  $("filter-pago").addEventListener("change", applyFilter);
+  $("btn-new").addEventListener("click", openNew);
+  $("btn-save").addEventListener("click", saveRecord);
+  $("btn-cancel").addEventListener("click", closeModal);
+  $("btn-export").addEventListener("click", exportCSV);
+  $("btn-refresh").addEventListener("click", loadRecords);
+  $("btn-import").addEventListener("click", importExcel);
+  $("f-precio").addEventListener("input", autoTotal);
+  $("f-cantidad").addEventListener("input", autoTotal);
+  $("modal").addEventListener("click", e=>{ if(e.target===$("modal")) closeModal(); });
+  $("btn-logout").addEventListener("click", ()=>{
+    sessionStorage.removeItem(SESSION_KEY);
+    location.reload();
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────
+window.addEventListener("DOMContentLoaded", ()=>{
+  if(checkAuth()){
+    $("login-screen").style.display = "none";
+    $("app").style.display = "block";
+    initApp();
+  }
+  $("btn-login").addEventListener("click", doLogin);
+  $("login-input").addEventListener("keydown", e=>{ if(e.key==="Enter") doLogin(); });
+});
+</script>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;min-height:100vh}
+
+/* Header */
+header{background:linear-gradient(135deg,#111,#222);border-bottom:2px solid #c9a227;
+  padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;
+  box-shadow:0 3px 14px #0005}
+header h1{font-size:1.2rem;font-weight:700;color:#c9a227;letter-spacing:.3px;display:flex;align-items:center;gap:.6rem;line-height:1.2}
+header h1 .ico{font-size:1.5rem;filter:drop-shadow(0 0 6px #c9a22780)}
+header h1 .brand{display:flex;flex-direction:column}
+header h1 .brand-name{color:#fff;font-size:1.1rem;font-weight:700}
+header h1 .brand-sub{font-size:.62rem;font-weight:400;color:#8a6f2e;letter-spacing:1.8px;text-transform:uppercase}
+
+/* Stats */
+.stats{display:flex;gap:1rem;padding:1rem 1.5rem;flex-wrap:wrap}
+.stat-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem 1.25rem;
+  flex:1;min-width:130px;text-align:center;box-shadow:0 1px 4px #0001}
+.stat-card .val{font-size:1.4rem;font-weight:700;color:#1d4ed8}
+.stat-card .lbl{font-size:.72rem;color:#64748b;margin-top:.2rem}
+
+/* Toolbar */
+.toolbar{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;padding:.75rem 1.5rem;
+  background:#fff;border-bottom:1px solid #e2e8f0;box-shadow:0 1px 3px #0001}
+input[type=text],select,input[type=file]{
+  background:#f8fafc;border:1px solid #cbd5e1;color:#1e293b;border-radius:6px;
+  padding:.45rem .7rem;font-size:.82rem;outline:none}
+input[type=text]:focus,select:focus{border-color:#2563eb;background:#fff}
+input[type=text]{width:220px}
+.btn{padding:.45rem 1rem;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;
+  font-weight:600;transition:.15s}
+.btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
+.btn-success{background:#16a34a;color:#fff}.btn-success:hover{background:#15803d}
+.btn-outline{background:transparent;border:1px solid #c9a22760;color:#c9a227}.btn-outline:hover{border-color:#c9a227;background:#c9a22715;color:#e8c95a}
+.btn-orange{background:#ea580c;color:#fff}.btn-orange:hover{background:#c2410c}
+
+/* Table */
+.table-wrap{overflow-x:auto;padding:0 1.5rem 1.5rem}
+table{width:100%;border-collapse:collapse;font-size:.8rem;min-width:900px;background:#fff;
+  border-radius:10px;overflow:hidden;box-shadow:0 1px 4px #0001;margin-top:1rem}
+thead th{background:#2563eb;padding:.6rem .7rem;text-align:left;font-size:.72rem;
+  text-transform:uppercase;letter-spacing:.5px;color:#dbeafe;position:sticky;top:0;
+  border-bottom:2px solid #1d4ed8;white-space:nowrap}
+tbody tr{border-bottom:1px solid #f1f5f9}
+tbody tr:hover{background:#eff6ff}
+td{padding:.55rem .7rem;vertical-align:top;color:#334155}
+.col-detalle{max-width:150px;font-weight:600;color:#1e293b}
+.col-trabajo{max-width:220px;color:#64748b;font-size:.75rem;word-break:break-word}
+.col-num{text-align:right;white-space:nowrap;color:#15803d;font-weight:600}
+.col-fecha{white-space:nowrap;font-size:.75rem;color:#64748b}
+.col-acciones{white-space:nowrap}
+
+/* Badges */
+.badge{display:inline-block;padding:.15rem .5rem;border-radius:999px;font-size:.68rem;font-weight:600}
+.badge-retirado{background:#dbeafe;color:#1d4ed8;border:1px solid #93c5fd}
+.badge-reparado{background:#dcfce7;color:#15803d;border:1px solid #86efac}
+.badge-pendiente{background:#fef9c3;color:#a16207;border:1px solid #fde047}
+.badge-pagado{background:#dcfce7;color:#15803d;border:1px solid #86efac}
+.badge-rechazo{background:#fee2e2;color:#dc2626;border:1px solid #fca5a5}
+.badge-neutro{background:#f1f5f9;color:#64748b;border:1px solid #cbd5e1}
+
+/* Botones icono */
+.btn-icon{background:none;border:none;cursor:pointer;font-size:1rem;padding:.2rem .3rem;border-radius:4px;transition:.15s}
+.btn-edit:hover{background:#dbeafe}
+.btn-del:hover{background:#fee2e2}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:#00000060;z-index:100;
+  align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal-box{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:1.5rem;
+  width:min(96vw,560px);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px #0003}
+.modal-box h2{font-size:1rem;margin-bottom:1rem;color:#1e293b;font-weight:700}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem}
+.form-grid .full{grid-column:1/-1}
+label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weight:600}
+.form-grid input,.form-grid select,.form-grid textarea{
+  width:100%;background:#f8fafc;border:1px solid #cbd5e1;color:#1e293b;
+  border-radius:6px;padding:.45rem .7rem;font-size:.82rem;outline:none}
+.form-grid input:focus,.form-grid select:focus,.form-grid textarea:focus{border-color:#2563eb;background:#fff}
+.form-grid textarea{resize:vertical;min-height:60px}
+.modal-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem}
+
+/* Import section */
+.import-bar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.import-bar label{font-size:.75rem;color:#64748b;white-space:nowrap;font-weight:600}
+
+/* Loading */
+#loading{display:none;position:fixed;inset:0;background:#ffffff90;z-index:200;
+  align-items:center;justify-content:center;flex-direction:column;gap:1rem}
+.spinner{width:40px;height:40px;border:4px solid #e2e8f0;border-top-color:#2563eb;
+  border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading span{color:#64748b;font-size:.85rem}
+
+/* Toast */
+#toast{display:none;position:fixed;bottom:1.5rem;right:1.5rem;padding:.7rem 1.2rem;
+  border-radius:8px;font-size:.85rem;font-weight:600;z-index:300;max-width:320px;box-shadow:0 4px 12px #0002}
+.toast-ok{background:#16a34a;color:#fff}
+.toast-error{background:#dc2626;color:#fff}
+
+
+/* Login screen */
+#login-screen{display:flex;position:fixed;inset:0;z-index:9999;background:#ffffff;
+  align-items:center;justify-content:center;flex-direction:column}
+.login-box{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:2.5rem 2rem;
+  width:min(90vw,360px);text-align:center;box-shadow:0 4px 24px #0001}
+.login-logo{font-size:3rem;margin-bottom:.3rem}
+.login-title{font-size:1.4rem;font-weight:700;color:#1e293b;margin-bottom:.2rem}
+.login-sub{font-size:.72rem;color:#64748b;letter-spacing:1.8px;text-transform:uppercase;margin-bottom:2rem}
+.login-label{font-size:.75rem;color:#64748b;margin-bottom:.4rem;text-align:left;display:block;font-weight:600}
+.login-input-wrap{position:relative;margin-bottom:1.2rem}
+#login-input{width:100%;background:#f8fafc;border:1.5px solid #cbd5e1;color:#1e293b;
+  border-radius:8px;padding:.65rem 2.5rem .65rem .8rem;font-size:.95rem;outline:none;letter-spacing:2px;text-align:center}
+#login-input:focus{border-color:#2563eb;box-shadow:0 0 0 3px #2563eb20;background:#fff}
+#toggle-pw{position:absolute;right:.7rem;top:50%;transform:translateY(-50%);
+  background:none;border:none;cursor:pointer;color:#94a3b8;font-size:1rem;padding:0}
+#btn-login{width:100%;padding:.7rem;background:#2563eb;
+  border:none;border-radius:8px;color:#fff;font-weight:700;font-size:.95rem;cursor:pointer;
+  letter-spacing:.5px;transition:.2s;margin-top:.2rem}
+#btn-login:hover{background:#1d4ed8;box-shadow:0 4px 14px #2563eb40}
+#login-error{display:none;background:#fee2e2;color:#dc2626;border-radius:6px;
+  padding:.45rem .7rem;font-size:.78rem;margin-top:.8rem;font-weight:600;border:1px solid #fca5a5}
+
+/* Responsive */
+@media(max-width:600px){
+  .form-grid{grid-template-columns:1fr}
+  .form-grid .full{grid-column:1}
+  input[type=text]{width:150px}
+  .stats{gap:.5rem}
+  .stat-card .val{font-size:1.1rem}
+}
+</style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">💡</div>
+    <div class="login-title">Juan Mucci</div>
+    <div class="login-sub">Soluciones Tecnológicas</div>
+    <label class="login-label">Contraseña de acceso</label>
+    <div class="login-input-wrap">
+      <input type="password" id="login-input" placeholder="••••••••" autocomplete="current-password"/>
+      <button id="toggle-pw" onclick="const i=document.getElementById('login-input');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'👁️':'🙈'" tabindex="-1">👁️</button>
+    </div>
+    <button id="btn-login">Ingresar</button>
+    <div id="login-error">❌ Contraseña incorrecta</div>
+  </div>
+</div>
+
+<!-- App (hidden until login) -->
+<div id="app" style="display:none">
+
+<!-- Loading overlay -->
+<div id="loading"><div class="spinner"></div><span>Cargando...</span></div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- Header -->
+<header>
+  <h1>
+    <span class="ico">💡</span>
+    <span class="brand">
+      <span class="brand-name">Juan Mucci</span>
+      <span class="brand-sub">Soluciones Tecnológicas · Reparaciones</span>
+    </span>
+  </h1>
+  <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+    <button class="btn btn-outline" id="btn-refresh">🔄 Actualizar</button>
+    <button class="btn btn-success" id="btn-new">+ Nueva Reparación</button>
+    <button class="btn" id="btn-logout" style="background:#7f1d1d;color:#fca5a5;border:none" title="Cerrar sesión">🚪 Salir</button>
+  </div>
+</header>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat-card"><div class="val" id="stat-items">-</div><div class="lbl">Registros</div></div>
+  <div class="stat-card"><div class="val" id="stat-total">-</div><div class="lbl">Total facturado</div></div>
+  <div class="stat-card"><div class="val" id="stat-cobrado">-</div><div class="lbl">Cobrado (PAGADO)</div></div>
+  <div class="stat-card"><div class="val" id="stat-pend">-</div><div class="lbl">Pendientes</div></div>
+</div>
+
+<!-- Toolbar -->
+<div class="toolbar">
+  <input type="text" id="search" placeholder="🔍 Buscar detalle, trabajo, cliente…"/>
+
+  <select id="filter-estado">
+    <option value="">Todos los estados</option>
+    <option>Retirado</option>
+    <option>Reparado</option>
+    <option>Pendiente</option>
+    <option>No acepto presupuesto</option>
+    <option>-</option>
+  </select>
+
+  <select id="filter-pago">
+    <option value="">Todos los pagos</option>
+    <option value="PAGADO">PAGADO</option>
+    <option value="Pendiente">Pendiente</option>
+  </select>
+
+  <button class="btn btn-outline" id="btn-export">📥 Exportar CSV</button>
+
+  <div class="import-bar">
+    <label>Importar XLSX:</label>
+    <input type="file" id="import-file" accept=".xlsx,.xls"/>
+    <button class="btn btn-orange" id="btn-import">⬆ Importar</button>
+  </div>
+</div>
+
+<!-- Table -->
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Detalle</th>
+      <th>Trabajo realizado</th>
+      <th style="text-align:right">Gastos</th>
+      <th style="text-align:right">$ x Unidad</th>
+      <th style="text-align:right">Cant.</th>
+      <th>Cliente</th>
+      <th>Estado</th>
+      <th>F. Recibido</th>
+      <th>F. Retiro</th>
+      <th>Estado Pago</th>
+      <th style="text-align:right">Total</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal-box">
+    <h2 id="modal-title">Nueva Reparación</h2>
+    <div id="form-rep" class="form-grid">
+
+      <div class="full">
+        <label>Detalle *</label>
+        <input type="text" id="f-detalle" placeholder="Ej: Tacho PLS 543"/>
+      </div>
+
+      <div class="full">
+        <label>Trabajo realizado</label>
+        <textarea id="f-trabajo" placeholder="Descripción del trabajo..."></textarea>
+      </div>
+
+      <div>
+        <label>Gastos repuestos ($)</label>
+        <input type="number" id="f-gastos" min="0" value="0"/>
+      </div>
+
+      <div>
+        <label>$ x Unidad</label>
+        <input type="number" id="f-precio" min="0" value="0"/>
+      </div>
+
+      <div>
+        <label>Cantidad</label>
+        <input type="number" id="f-cantidad" min="1" value="1"/>
+      </div>
+
+      <div>
+        <label>Total ($)</label>
+        <input type="number" id="f-total" min="0" value="0"/>
+      </div>
+
+      <div>
+        <label>Cliente</label>
+        <input type="text" id="f-cliente" placeholder="Nombre cliente"/>
+      </div>
+
+      <div>
+        <label>Estado</label>
+        <select id="f-estado">
+          <option value="">-</option>
+          <option>Retirado</option>
+          <option>Reparado</option>
+          <option>Pendiente</option>
+          <option>No acepto presupuesto</option>
+          <option>-</option>
+        </select>
+      </div>
+
+      <div>
+        <label>Fecha recibido</label>
+        <input type="date" id="f-fRec"/>
+      </div>
+
+      <div>
+        <label>Fecha retiro</label>
+        <input type="date" id="f-fRet"/>
+      </div>
+
+      <div class="full">
+        <label>Estado Pago</label>
+        <select id="f-pago">
+          <option value="">-</option>
+          <option value="PAGADO">PAGADO</option>
+          <option value="Pendiente">Pendiente</option>
+          <option value="no se quiso reparar">no se quiso reparar</option>
+          <option value="No se la llevo, la deja">No se la llevo, la deja</option>
+        </select>
+      </div>
+
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="btn-cancel">Cancelar</button>
+      <button class="btn btn-primary" id="btn-save">💾 Guardar</button>
+    </div>
+  </div>
+</div>
+
+</div><!-- /app -->
+</body>
+</html>
