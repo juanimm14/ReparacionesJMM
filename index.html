@@ -69,6 +69,11 @@ async function loadRecords(){
     });
     renderTable(allRecords);
     updateStats(allRecords);
+    // Re-aplicar filtros activos si los hay
+    const q    = $("search") && $("search").value.trim();
+    const est  = $("filter-estado") && $("filter-estado").value;
+    const pago = $("filter-pago") && $("filter-pago").value;
+    if(q || est || pago) applyFilter();
   }catch(e){
     console.error(e);
     showToast("Error al cargar: "+e.message,"error");
@@ -90,12 +95,13 @@ function renderTable(records){
   const tbody = $("tbody");
   tbody.innerHTML = "";
   if(!records.length){
-    tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`;
+    tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`;
     return;
   }
   records.forEach(r=>{
     const tr = document.createElement("tr");
     tr.innerHTML=`
+      <td class="col-serial">${r.serial||"-"}</td>
       <td class="col-detalle">${r.detalle||"-"}</td>
       <td class="col-trabajo">${r.trabajo||"-"}</td>
       <td class="col-num">${fmtMoney(r.gastosRepuestos)}</td>
@@ -133,7 +139,7 @@ function applyFilter(){
   const est  = $("filter-estado").value;
   const pago = $("filter-pago").value;
   let res = allRecords.filter(r=>{
-    const matchQ = !q || [r.detalle,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
+    const matchQ = !q || [r.serial,r.detalle,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
     const matchE = !est || r.estado===est;
     const matchP = !pago || (r.estadoPago||"").toUpperCase()===(pago).toUpperCase();
     return matchQ && matchE && matchP;
@@ -146,7 +152,19 @@ function applyFilter(){
 function openNew(){
   editingId=null;
   $("modal-title").textContent="Nueva Reparación";
-  $("form-rep").reset();
+  // Limpiar campos manualmente (el contenedor es un div, no un form)
+  $("f-serial").value   = "";
+  $("f-detalle").value  = "";
+  $("f-trabajo").value  = "";
+  $("f-gastos").value   = 0;
+  $("f-precio").value   = 0;
+  $("f-cantidad").value = 1;
+  $("f-total").value    = 0;
+  $("f-cliente").value  = "";
+  $("f-estado").value   = "";
+  $("f-fRec").value     = "";
+  $("f-fRet").value     = "";
+  $("f-pago").value     = "";
   $("modal").classList.add("open");
 }
 
@@ -155,6 +173,7 @@ window.openEdit = async function(id){
   if(!r) return;
   editingId = id;
   $("modal-title").textContent = "Editar Reparación";
+  $("f-serial").value         = r.serial||"";
   $("f-detalle").value        = r.detalle||"";
   $("f-trabajo").value        = r.trabajo||"";
   $("f-gastos").value         = r.gastosRepuestos||0;
@@ -193,6 +212,7 @@ function closeModal(){
 
 async function saveRecord(){
   const data = {
+    serial:          $("f-serial").value.trim(),
     detalle:         $("f-detalle").value.trim(),
     trabajo:         $("f-trabajo").value.trim(),
     gastosRepuestos: Number($("f-gastos").value)||0,
@@ -256,6 +276,7 @@ async function importExcel(){
       // Expect header in row 0
       const header = rows[0].map(h=> (h||"").toString().toLowerCase());
       const idx = {
+        serial:          findCol(header,["serial","n° serie","nro serie","numero serie"]),
         detalle:         findCol(header,["detalle"]),
         trabajo:         findCol(header,["trabajo realizado"]),
         gastosRepuestos: findCol(header,["gastos repuestos","gastos"]),
@@ -277,6 +298,7 @@ async function importExcel(){
         if(!detalle && !cliente) continue;
 
         records.push({
+          serial:          (row[idx.serial]||"").toString().trim(),
           detalle,
           trabajo:         (row[idx.trabajo]||"").toString().trim(),
           gastosRepuestos: toNum(row[idx.gastosRepuestos]),
@@ -394,9 +416,9 @@ function autoTotal(){
 
 // ── Export CSV ────────────────────────────────────────────
 function exportCSV(){
-  const headers = ["Detalle","Trabajo realizado","Gastos repuestos","$ x unidad","Cantidad","Cliente","Estado","Fecha recibido","Fecha retiro","Estado Pago","Total"];
+  const headers = ["Serial","Detalle","Trabajo realizado","Gastos repuestos","$ x unidad","Cantidad","Cliente","Estado","Fecha recibido","Fecha retiro","Estado Pago","Total"];
   const rows = allRecords.map(r=>[
-    r.detalle,r.trabajo,r.gastosRepuestos,r.precioUnitario,r.cantidad,
+    r.serial,r.detalle,r.trabajo,r.gastosRepuestos,r.precioUnitario,r.cantidad,
     r.cliente,r.estado,r.fechaRecibido,r.fechaRetiro,r.estadoPago,r.total
   ].map(v=> `"${(v||"").toString().replace(/"/g,'""')}"`).join(","));
   const csv = [headers.join(","),...rows].join("\n");
@@ -411,13 +433,13 @@ const PASSWORD = "JMM2025";
 const SESSION_KEY = "jmm_auth";
 
 function checkAuth(){
-  return sessionStorage.getItem(SESSION_KEY) === "ok";
+  return localStorage.getItem(SESSION_KEY) === "ok";
 }
 
 function doLogin(){
   const val = $("login-input").value;
   if(val === PASSWORD){
-    sessionStorage.setItem(SESSION_KEY,"ok");
+    localStorage.setItem(SESSION_KEY,"ok");
     $("login-screen").style.display = "none";
     $("app").style.display = "block";
     initApp();
@@ -449,6 +471,7 @@ function initApp(){
   $("modal").addEventListener("click", e=>{ if(e.target===$("modal")) closeModal(); });
   $("btn-logout").addEventListener("click", ()=>{
     sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
     location.reload();
   });
 }
@@ -511,6 +534,7 @@ thead th{background:#2563eb;padding:.6rem .7rem;text-align:left;font-size:.72rem
 tbody tr{border-bottom:1px solid #f1f5f9}
 tbody tr:hover{background:#eff6ff}
 td{padding:.55rem .7rem;vertical-align:top;color:#334155}
+.col-serial{white-space:nowrap;font-size:.75rem;color:#64748b;font-family:monospace}
 .col-detalle{max-width:150px;font-weight:600;color:#1e293b}
 .col-trabajo{max-width:220px;color:#64748b;font-size:.75rem;word-break:break-word}
 .col-num{text-align:right;white-space:nowrap;color:#15803d;font-weight:600}
@@ -684,6 +708,7 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
 <table>
   <thead>
     <tr>
+      <th>Serial</th>
       <th>Detalle</th>
       <th>Trabajo realizado</th>
       <th style="text-align:right">Gastos</th>
@@ -707,6 +732,11 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
   <div class="modal-box">
     <h2 id="modal-title">Nueva Reparación</h2>
     <div id="form-rep" class="form-grid">
+
+      <div class="full">
+        <label>Serial / N° de Serie</label>
+        <input type="text" id="f-serial" placeholder="Ej: SN-123456"/>
+      </div>
 
       <div class="full">
         <label>Detalle *</label>
