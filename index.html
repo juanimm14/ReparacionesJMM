@@ -5,10 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Reparaciones JMM</title>
 
-<!-- Firebase -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, orderBy, writeBatch, limit }
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, writeBatch }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -21,12 +20,16 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+const db  = getFirestore(app);
 
 // ── Estado global ─────────────────────────────────────────
-let allRecords = [];
-let editingId  = null;
-let pendingImportFile = null;
+let allRecords  = [];
+let allClientes = [];
+let allGastos   = [];
+let editingId   = null;
+let editingClienteId = null;
+let editingGastoId   = null;
+let currentTab  = "reparaciones";
 
 // ── Helpers ───────────────────────────────────────────────
 function $(id){ return document.getElementById(id); }
@@ -37,56 +40,16 @@ function fmtMoney(n){
 }
 
 function badgeEstado(v){
-  const map = {
-    "Retirado":"badge-retirado","Reparado":"badge-reparado",
+  const map = {"Retirado":"badge-retirado","Reparado":"badge-reparado",
     "Pendiente":"badge-pendiente","pendiente":"badge-pendiente",
-    "-":"badge-neutro","No acepto presupuesto":"badge-rechazo",
-    "Pagado":"badge-pagado"
-  };
-  const cls = map[v] || "badge-neutro";
-  return `<span class="badge ${cls}">${v||"-"}</span>`;
+    "-":"badge-neutro","No acepto presupuesto":"badge-rechazo","Pagado":"badge-pagado"};
+  return `<span class="badge ${map[v]||"badge-neutro"}">${v||"-"}</span>`;
 }
-
 function badgePago(v){
-  const upper = (v||"").toUpperCase();
-  if(upper==="PAGADO") return `<span class="badge badge-pagado">${v}</span>`;
-  if(upper==="PENDIENTE") return `<span class="badge badge-pendiente">${v}</span>`;
+  const u=(v||"").toUpperCase();
+  if(u==="PAGADO") return `<span class="badge badge-pagado">${v}</span>`;
+  if(u==="PENDIENTE") return `<span class="badge badge-pendiente">${v}</span>`;
   return `<span class="badge badge-neutro">${v||"-"}</span>`;
-}
-
-// ── Cargar desde Firestore ────────────────────────────────
-async function loadRecords(){
-  showLoading(true);
-  try{
-    const snap = await getDocs(collection(db,"reparaciones"));
-    allRecords = [];
-    snap.forEach(d=> allRecords.push({id:d.id,...d.data()}));
-    // sort by fechaRecibido desc (string dd/mm/yyyy)
-    allRecords.sort((a,b)=>{
-      const pa = parseDate(a.fechaRecibido);
-      const pb = parseDate(b.fechaRecibido);
-      return pb - pa;
-    });
-    renderTable(allRecords);
-    updateStats(allRecords);
-    // Re-aplicar filtros activos si los hay
-    const q    = $("search") && $("search").value.trim();
-    const est  = $("filter-estado") && $("filter-estado").value;
-    const pago = $("filter-pago") && $("filter-pago").value;
-    if(q || est || pago) applyFilter();
-  }catch(e){
-    console.error(e);
-    const msg = e.message||e.code||JSON.stringify(e);
-    showToast("Error al cargar: "+msg,"error");
-    // Mostrar el error visible en la tabla para debug en mobile
-    const tbody = $("tbody");
-    tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:2rem;color:#dc2626;font-weight:600;font-size:.85rem">
-      ⚠️ Error al cargar datos:<br><span style="font-family:monospace;font-size:.75rem;color:#7f1d1d">${msg}</span><br>
-      <span style="font-size:.72rem;color:#64748b;font-weight:400">Revisá las reglas de Firestore o la conexión</span>
-    </td></tr>`;
-    updateStats([]);
-  }
-  showLoading(false);
 }
 
 function parseDate(s){
@@ -94,206 +57,6 @@ function parseDate(s){
   const [d,m,y] = s.split("/");
   return new Date(y,m-1,d).getTime();
 }
-
-// ── Edición inline ───────────────────────────────────────
-window.editCell = async function(id, field, currentVal){
-  const r = allRecords.find(x=>x.id===id);
-  if(!r) return;
-  const selectOpts = {
-    estado:    ["","Retirado","Reparado","Pendiente","No acepto presupuesto","-"],
-    estadoPago:["","PAGADO","Pendiente","no se quiso reparar","No se la llevo, la deja"],
-  };
-  const dateFields = ["fechaRecibido","fechaRetiro"];
-  let newVal;
-  if(selectOpts[field]){
-    newVal = await showInlineSelect(field, currentVal, selectOpts[field]);
-  } else if(dateFields.includes(field)){
-    newVal = await showInlineInput(field, currentVal, "date");
-    if(newVal) newVal = fromInputDate(newVal);
-    else newVal = currentVal;
-  } else {
-    newVal = await showInlineInput(field, currentVal, "text");
-  }
-  if(newVal === null) return;
-  if(newVal === currentVal) return;
-  try{
-    await updateDoc(doc(db,"reparaciones",id), {[field]: newVal});
-    r[field] = newVal;
-    showToast("Guardado ✔","ok");
-    renderTable(allRecords);
-    updateStats(allRecords);
-  }catch(e){ showToast("Error: "+e.message,"error"); }
-};
-
-function showInlineSelect(field, current, opts){
-  return new Promise(resolve=>{
-    document.getElementById("inline-popup")?.remove();
-    const labels = {estado:"Estado", estadoPago:"Estado de pago"};
-    const div = document.createElement("div");
-    div.id = "inline-popup";
-    div.style.cssText="position:fixed;z-index:500;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem;box-shadow:0 8px 32px #0004;min-width:200px;max-width:280px;top:50%;left:50%;transform:translate(-50%,-50%)";
-    const title = document.createElement("div");
-    title.style.cssText="font-size:.75rem;font-weight:700;color:#64748b;margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.5px";
-    title.textContent = "✏️ " + (labels[field]||field);
-    div.appendChild(title);
-    opts.forEach(o=>{
-      const btn = document.createElement("button");
-      btn.style.cssText="display:block;width:100%;text-align:left;padding:.4rem .6rem;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;margin-bottom:.2rem;background:"+(o===current?"#dbeafe":"#f8fafc")+";color:"+(o===current?"#1d4ed8":"#334155")+";font-weight:"+(o===current?"700":"400");
-      btn.textContent = o||"(vacío)";
-      btn.onclick = ()=>{ div.remove(); resolve(o); };
-      div.appendChild(btn);
-    });
-    const cancel = document.createElement("button");
-    cancel.style.cssText="display:block;width:100%;text-align:center;padding:.4rem;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-size:.78rem;margin-top:.3rem;background:#fff;color:#64748b";
-    cancel.textContent = "Cancelar";
-    cancel.onclick = ()=>{ div.remove(); resolve(null); };
-    div.appendChild(cancel);
-    document.body.appendChild(div);
-    setTimeout(()=>{
-      document.addEventListener("click", function h(e){
-        if(!div.contains(e.target)){ div.remove(); resolve(null); document.removeEventListener("click",h); }
-      });
-    }, 100);
-  });
-}
-
-function showInlineInput(field, current, type){
-  return new Promise(resolve=>{
-    document.getElementById("inline-popup")?.remove();
-    const labels = {serial:"Serial",detalle:"Detalle",trabajo:"Trabajo realizado",falla:"Falla reportada",cliente:"Cliente",fechaRecibido:"Fecha recibido",fechaRetiro:"Fecha retiro",total:"Total ($)"};
-    const inputVal = type==="date" ? toInputDate(current) : (current||"");
-    const div = document.createElement("div");
-    div.id = "inline-popup";
-    div.style.cssText="position:fixed;z-index:500;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem;box-shadow:0 8px 32px #0004;min-width:240px;max-width:300px;top:50%;left:50%;transform:translate(-50%,-50%)";
-    const title = document.createElement("div");
-    title.style.cssText="font-size:.75rem;font-weight:700;color:#64748b;margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.5px";
-    title.textContent = "✏️ " + (labels[field]||field);
-    div.appendChild(title);
-    const inp = document.createElement(type==="text"&&field==="trabajo"?"textarea":"input");
-    if(inp.tagName==="INPUT") inp.type = type;
-    inp.value = inputVal;
-    inp.style.cssText="width:100%;padding:.5rem;border:1.5px solid #2563eb;border-radius:6px;font-size:.9rem;margin-bottom:.5rem;outline:none;background:#f8fafc";
-    div.appendChild(inp);
-    const row = document.createElement("div");
-    row.style.cssText="display:flex;gap:.4rem;justify-content:flex-end";
-    const btnCancel = document.createElement("button");
-    btnCancel.textContent="Cancelar";
-    btnCancel.style.cssText="padding:.35rem .7rem;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-size:.78rem;background:#fff;color:#64748b";
-    btnCancel.onclick=()=>{ div.remove(); resolve(null); };
-    const btnOk = document.createElement("button");
-    btnOk.textContent="Guardar";
-    btnOk.style.cssText="padding:.35rem .7rem;border:none;border-radius:6px;cursor:pointer;font-size:.78rem;background:#2563eb;color:#fff;font-weight:700";
-    btnOk.onclick=()=>{ div.remove(); resolve(inp.value); };
-    row.appendChild(btnCancel); row.appendChild(btnOk);
-    div.appendChild(row);
-    document.body.appendChild(div);
-    inp.focus(); if(inp.select) inp.select();
-    inp.addEventListener("keydown",e=>{
-      if(e.key==="Enter"&&inp.tagName!=="TEXTAREA"){ div.remove(); resolve(inp.value); }
-      if(e.key==="Escape"){ div.remove(); resolve(null); }
-    });
-  });
-}
-
-// ── Renderizar tabla ──────────────────────────────────────
-function renderTable(records){
-  const tbody = $("tbody");
-  tbody.innerHTML = "";
-  if(!records.length){
-    tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`;
-    return;
-  }
-  records.forEach(r=>{
-    const tr = document.createElement("tr");
-    const ec=(field,val)=>`onclick="editCell('${r.id}','${field}','${(val||'').toString().replace(/'/g,String.fromCharCode(39))}')" title="Tocar para editar"`;
-    tr.innerHTML=`
-      <td class="col-serial editable" ${ec("serial",r.serial)}>${r.serial||"-"}</td>
-      <td class="col-detalle editable" ${ec("detalle",r.detalle)}>${r.detalle||"-"}</td>
-      <td class="col-falla editable" ${ec("falla",r.falla)}>${r.falla||"-"}</td>
-      <td class="col-trabajo editable" ${ec("trabajo",r.trabajo)}>${r.trabajo||"-"}</td>
-      <td class="editable" ${ec("cliente",r.cliente)}>${r.cliente||"-"}</td>
-      <td class="editable" ${ec("estado",r.estado)}>${badgeEstado(r.estado)}</td>
-      <td class="col-fecha editable" ${ec("fechaRecibido",r.fechaRecibido)}>${r.fechaRecibido||"-"}</td>
-      <td class="col-fecha editable" ${ec("fechaRetiro",r.fechaRetiro)}>${r.fechaRetiro||"-"}</td>
-      <td class="editable" ${ec("estadoPago",r.estadoPago)}>${badgePago(r.estadoPago)}</td>
-      <td class="col-num editable" ${ec("total",r.total)}><strong>${fmtMoney(r.total)}</strong></td>
-      <td class="col-acciones">
-        <button class="btn-icon btn-edit" onclick="openEdit('${r.id}')" title="Editar todo">✏️</button>
-        <button class="btn-icon btn-del"  onclick="confirmDelete('${r.id}')" title="Eliminar">🗑️</button>
-      </td>`;
-    tbody.appendChild(tr);
-  });
-}
-
-// ── Stats ────────────────────────────────────────────────
-function updateStats(records){
-  const total    = records.reduce((s,r)=> s + (Number(r.total)||0), 0);
-  const cobrado  = records.filter(r=> (r.estadoPago||"").toUpperCase()==="PAGADO")
-                          .reduce((s,r)=> s+(Number(r.total)||0),0);
-  const pendCnt  = records.filter(r=> (r.estado||"").toLowerCase()==="pendiente").length;
-  $("stat-total").textContent  = fmtMoney(total);
-  $("stat-cobrado").textContent= fmtMoney(cobrado);
-  $("stat-items").textContent  = records.length;
-  $("stat-pend").textContent   = pendCnt;
-}
-
-// ── Búsqueda / filtro ─────────────────────────────────────
-function applyFilter(){
-  const q    = $("search").value.toLowerCase().trim();
-  const est  = $("filter-estado").value;
-  const pago = $("filter-pago").value;
-  let res = allRecords.filter(r=>{
-    const matchQ = !q || [r.serial,r.detalle,r.falla,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
-    const matchE = !est || r.estado===est;
-    const matchP = !pago || (r.estadoPago||"").toUpperCase()===(pago).toUpperCase();
-    return matchQ && matchE && matchP;
-  });
-  renderTable(res);
-  updateStats(res);
-}
-
-// ── Modal form ────────────────────────────────────────────
-function openNew(){
-  editingId=null;
-  $("modal-title").textContent="Nueva Reparación";
-  // Limpiar campos manualmente (el contenedor es un div, no un form)
-  $("f-serial").value   = "";
-  $("f-falla").value    = "";
-  $("f-detalle").value  = "";
-  $("f-trabajo").value  = "";
-  $("f-gastos").value   = 0;
-  $("f-precio").value   = 0;
-  $("f-cantidad").value = 1;
-  $("f-total").value    = 0;
-  $("f-cliente").value  = "";
-  $("f-estado").value   = "";
-  $("f-fRec").value     = "";
-  $("f-fRet").value     = "";
-  $("f-pago").value     = "";
-  $("modal").classList.add("open");
-}
-
-window.openEdit = async function(id){
-  const r = allRecords.find(x=>x.id===id);
-  if(!r) return;
-  editingId = id;
-  $("modal-title").textContent = "Editar Reparación";
-  $("f-serial").value         = r.serial||"";
-  $("f-falla").value          = r.falla||"";
-  $("f-detalle").value        = r.detalle||"";
-  $("f-trabajo").value        = r.trabajo||"";
-  $("f-gastos").value         = r.gastosRepuestos||0;
-  $("f-precio").value         = r.precioUnitario||0;
-  $("f-cantidad").value       = r.cantidad||1;
-  $("f-cliente").value        = r.cliente||"";
-  $("f-estado").value         = r.estado||"";
-  $("f-fRec").value           = toInputDate(r.fechaRecibido);
-  $("f-fRet").value           = toInputDate(r.fechaRetiro);
-  $("f-pago").value           = normalizePago(r.estadoPago);
-  $("f-total").value          = r.total||0;
-  $("modal").classList.add("open");
-}
-
 function toInputDate(s){
   if(!s) return "";
   const [d,m,y] = s.split("/");
@@ -307,290 +70,469 @@ function fromInputDate(s){
 }
 function normalizePago(v){
   const u=(v||"").toUpperCase();
-  if(u==="PAGADO"||u==="PAGADO ") return "PAGADO";
+  if(u==="PAGADO") return "PAGADO";
   if(u==="PENDIENTE") return "Pendiente";
   return v||"";
 }
 
-function closeModal(){
-  $("modal").classList.remove("open");
+// ── Tabs ──────────────────────────────────────────────────
+function switchTab(tab){
+  currentTab = tab;
+  ["reparaciones","clientes","gastos"].forEach(t=>{
+    $("tab-"+t).classList.toggle("tab-active", t===tab);
+    $("section-"+t).style.display = t===tab ? "block" : "none";
+  });
+  if(tab==="reparaciones") loadRecords();
+  if(tab==="clientes")     loadClientes();
+  if(tab==="gastos")       loadGastos();
 }
 
-async function saveRecord(){
-  const data = {
-    serial:          $("f-serial").value.trim(),
-    falla:           $("f-falla").value.trim(),
-    detalle:         $("f-detalle").value.trim(),
-    trabajo:         $("f-trabajo").value.trim(),
-    gastosRepuestos: Number($("f-gastos").value)||0,
-    precioUnitario:  Number($("f-precio").value)||0,
-    cantidad:        Number($("f-cantidad").value)||1,
-    cliente:         $("f-cliente").value.trim(),
-    estado:          $("f-estado").value,
-    fechaRecibido:   fromInputDate($("f-fRec").value),
-    fechaRetiro:     fromInputDate($("f-fRet").value),
-    estadoPago:      $("f-pago").value,
-    total:           Number($("f-total").value)||0,
-  };
-  if(!data.detalle){ showToast("El detalle es obligatorio","error"); return; }
+// ══════════════════════════════════════════════════════════
+// ── REPARACIONES ──────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+async function loadRecords(){
+  showLoading(true);
   try{
-    if(editingId){
-      await updateDoc(doc(db,"reparaciones",editingId), data);
-      showToast("Registro actualizado ✔","ok");
-    } else {
-      await addDoc(collection(db,"reparaciones"), data);
-      showToast("Registro guardado ✔","ok");
-    }
-    closeModal();
-    loadRecords();
-  }catch(e){ showToast("Error: "+e.message,"error"); }
-}
-
-window.confirmDelete = function(id){
-  if(confirm("¿Eliminar este registro?")) deleteRecord(id);
-}
-async function deleteRecord(id){
-  try{
-    await deleteDoc(doc(db,"reparaciones",id));
-    showToast("Eliminado","ok");
-    loadRecords();
-  }catch(e){ showToast("Error: "+e.message,"error"); }
-}
-
-// ── Importar Excel ────────────────────────────────────────
-async function importExcel(){
-  // En mobile, usar el archivo capturado en el evento change
-  const file = pendingImportFile || $("import-file").files[0];
-  if(!file){ showToast("Seleccioná un archivo xlsx primero","error"); return; }
-
-  // Load SheetJS dynamically
-  if(!window.XLSX){
-    showLoading(true);
-    try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"); }
-    catch(e){ showLoading(false); showToast("Error al cargar librería Excel","error"); return; }
-    showLoading(false);
+    const snap = await getDocs(collection(db,"reparaciones"));
+    allRecords = [];
+    snap.forEach(d=> allRecords.push({id:d.id,...d.data()}));
+    allRecords.sort((a,b)=>parseDate(b.fechaRecibido)-parseDate(a.fechaRecibido));
+    renderTable(allRecords);
+    updateStats(allRecords);
+    const q=($("search")||{}).value||"", est=($("filter-estado")||{}).value||"", pago=($("filter-pago")||{}).value||"";
+    if(q||est||pago) applyFilter();
+  }catch(e){
+    const msg=e.message||e.code||String(e);
+    $("tbody").innerHTML=`<tr><td colspan="10" style="text-align:center;padding:2rem;color:#dc2626;font-weight:600">⚠️ ${msg}</td></tr>`;
+    updateStats([]);
   }
+  showLoading(false);
+}
 
-  const reader = new FileReader();
-  reader.onload = async function(e){
-    try{
-      const wb   = XLSX.read(e.target.result, {type:"array"});
-      const ws   = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:""});
-
-      if(rows.length < 2){ showToast("El archivo está vacío","error"); return; }
-
-      // Expect header in row 0
-      const header = rows[0].map(h=> (h||"").toString().toLowerCase());
-      const idx = {
-        serial:          findCol(header,["serial","n° serie","nro serie","numero serie"]),
-        detalle:         findCol(header,["detalle"]),
-        trabajo:         findCol(header,["trabajo realizado"]),
-        gastosRepuestos: findCol(header,["gastos repuestos","gastos"]),
-        precioUnitario:  findCol(header,["$ x unidad","precio","unitario"]),
-        cantidad:        findCol(header,["cantidad"]),
-        cliente:         findCol(header,["cliente"]),
-        estado:          findCol(header,["estado"]),
-        fechaRecibido:   findCol(header,["fecha recibido","recibido"]),
-        fechaRetiro:     findCol(header,["fecha retiro","retiro"]),
-        estadoPago:      findCol(header,["estado pago","pago"]),
-        total:           findCol(header,["total"]),
-      };
-
-      const records = [];
-      for(let i=1;i<rows.length;i++){
-        const row = rows[i];
-        const detalle = (row[idx.detalle]||"").toString().trim();
-        const cliente = (row[idx.cliente]||"").toString().trim();
-        if(!detalle && !cliente) continue;
-
-        records.push({
-          serial:          (row[idx.serial]||"").toString().trim(),
-          detalle,
-          trabajo:         (row[idx.trabajo]||"").toString().trim(),
-          gastosRepuestos: toNum(row[idx.gastosRepuestos]),
-          precioUnitario:  toNum(row[idx.precioUnitario]),
-          cantidad:        toNum(row[idx.cantidad]) || 1,
-          cliente,
-          estado:          (row[idx.estado]||"").toString().trim(),
-          fechaRecibido:   xlDateToStr(row[idx.fechaRecibido]),
-          fechaRetiro:     xlDateToStr(row[idx.fechaRetiro]),
-          estadoPago:      (row[idx.estadoPago]||"").toString().trim(),
-          total:           toNum(row[idx.total]),
-        });
-      }
-
-      if(!records.length){ showToast("No se encontraron filas válidas","error"); return; }
-
-      if(!confirm(`Se importarán ${records.length} registros. ¿Continuar?`)) return;
-
-      showLoading(true);
-      // Importar en lotes de 400 (límite Firestore writeBatch es 500)
-      const BATCH_SIZE = 400;
-      let ok = 0, err = 0;
-      try {
-        for(let bi = 0; bi < records.length; bi += BATCH_SIZE){
-          const batch = writeBatch(db);
-          const chunk = records.slice(bi, bi + BATCH_SIZE);
-          chunk.forEach(r => {
-            const ref = doc(collection(db,"reparaciones"));
-            batch.set(ref, r);
-          });
-          await batch.commit();
-          ok += chunk.length;
-        }
-      } catch(batchErr) {
-        err = records.length - ok;
-      }
-      showLoading(false);
-      $("import-file").value="";
-      pendingImportFile = null;
-      showToast(`Importados: ${ok}${err ? "  —  Errores: "+err : ""}`,"ok");
-      loadRecords();
-    }catch(ex){
-      showLoading(false);
-      showToast("Error al leer el archivo: "+ex.message,"error");
-    }
+// Edición inline
+window.editCell = async function(id, field, currentVal){
+  const r = allRecords.find(x=>x.id===id);
+  if(!r) return;
+  const selectOpts = {
+    estado:["","Retirado","Reparado","Pendiente","No acepto presupuesto","-"],
+    estadoPago:["","PAGADO","Pendiente","no se quiso reparar","No se la llevo, la deja"],
   };
-  reader.readAsArrayBuffer(file);
-}
+  const dateFields = ["fechaRecibido","fechaRetiro"];
+  let newVal;
+  if(selectOpts[field])        newVal = await showInlineSelect(field, currentVal, selectOpts[field]);
+  else if(dateFields.includes(field)){ newVal = await showInlineInput(field,currentVal,"date"); if(newVal) newVal=fromInputDate(newVal); else newVal=currentVal; }
+  else                         newVal = await showInlineInput(field, currentVal, "text");
+  if(newVal===null||newVal===currentVal) return;
+  try{
+    await updateDoc(doc(db,"reparaciones",id),{[field]:newVal});
+    r[field]=newVal;
+    showToast("Guardado ✔","ok");
+    renderTable(allRecords); updateStats(allRecords);
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+};
 
-function findCol(header, candidates){
-  for(const c of candidates){
-    const i = header.indexOf(c);
-    if(i>=0) return i;
-  }
-  // partial match
-  for(const c of candidates){
-    const i = header.findIndex(h=> h.includes(c));
-    if(i>=0) return i;
-  }
-  return -1;
-}
-
-function toNum(v){
-  if(v===null||v===undefined||v==="") return 0;
-  const n = Number(v);
-  return isNaN(n) ? 0 : n;
-}
-
-function xlDateToStr(v){
-  if(!v && v!==0) return "";
-  // If already a string like dd/mm/yyyy
-  if(typeof v === "string"){
-    if(v.includes("/")) return v;
-    const n = Number(v);
-    if(isNaN(n)) return v;
-    v = n;
-  }
-  if(typeof v === "number" && v > 1000){
-    // Excel serial date
-    const d = new Date(Math.round((v - 25569)*86400*1000));
-    const dd = String(d.getUTCDate()).padStart(2,"0");
-    const mm = String(d.getUTCMonth()+1).padStart(2,"0");
-    const yyyy = d.getUTCFullYear();
-    return `${dd}/${mm}/${yyyy}`;
-  }
-  return "";
-}
-
-function loadScript(src){
-  return new Promise((res,rej)=>{
-    const s=document.createElement("script");
-    s.src=src; s.onload=res; s.onerror=rej;
-    document.head.appendChild(s);
+function showInlineSelect(field, current, opts){
+  return new Promise(resolve=>{
+    document.getElementById("inline-popup")?.remove();
+    const labels={estado:"Estado",estadoPago:"Estado de pago"};
+    const div=document.createElement("div");
+    div.id="inline-popup";
+    div.style.cssText="position:fixed;z-index:500;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem;box-shadow:0 8px 32px #0004;min-width:200px;max-width:280px;top:50%;left:50%;transform:translate(-50%,-50%)";
+    const title=document.createElement("div");
+    title.style.cssText="font-size:.75rem;font-weight:700;color:#64748b;margin-bottom:.5rem;text-transform:uppercase";
+    title.textContent="✏️ "+(labels[field]||field);
+    div.appendChild(title);
+    opts.forEach(o=>{
+      const btn=document.createElement("button");
+      btn.style.cssText="display:block;width:100%;text-align:left;padding:.4rem .6rem;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;margin-bottom:.2rem;background:"+(o===current?"#dbeafe":"#f8fafc")+";color:"+(o===current?"#1d4ed8":"#334155")+";font-weight:"+(o===current?"700":"400");
+      btn.textContent=o||"(vacío)";
+      btn.onclick=()=>{ div.remove(); resolve(o); };
+      div.appendChild(btn);
+    });
+    const cancel=document.createElement("button");
+    cancel.style.cssText="display:block;width:100%;text-align:center;padding:.4rem;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-size:.78rem;margin-top:.3rem;background:#fff;color:#64748b";
+    cancel.textContent="Cancelar";
+    cancel.onclick=()=>{ div.remove(); resolve(null); };
+    div.appendChild(cancel);
+    document.body.appendChild(div);
+    setTimeout(()=>{ document.addEventListener("click",function h(e){ if(!div.contains(e.target)){ div.remove(); resolve(null); document.removeEventListener("click",h); } }); },100);
   });
 }
 
-// ── UI helpers ────────────────────────────────────────────
-function showLoading(v){
-  $("loading").style.display = v?"flex":"none";
-}
-function showToast(msg,type){
-  const t=$("toast");
-  t.textContent=msg;
-  t.className="toast "+(type==="error"?"toast-error":"toast-ok");
-  t.style.display="block";
-  setTimeout(()=>t.style.display="none",3500);
+function showInlineInput(field, current, type){
+  return new Promise(resolve=>{
+    document.getElementById("inline-popup")?.remove();
+    const labels={serial:"Serial",detalle:"Detalle",trabajo:"Trabajo realizado",falla:"Falla reportada",cliente:"Cliente",fechaRecibido:"Fecha recibido",fechaRetiro:"Fecha retiro",total:"Total ($)"};
+    const inputVal=type==="date"?toInputDate(current):(current||"");
+    const div=document.createElement("div");
+    div.id="inline-popup";
+    div.style.cssText="position:fixed;z-index:500;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem;box-shadow:0 8px 32px #0004;min-width:260px;max-width:320px;top:50%;left:50%;transform:translate(-50%,-50%)";
+    const title=document.createElement("div");
+    title.style.cssText="font-size:.75rem;font-weight:700;color:#64748b;margin-bottom:.5rem;text-transform:uppercase";
+    title.textContent="✏️ "+(labels[field]||field);
+    div.appendChild(title);
+    const isTA=type==="text"&&(field==="trabajo"||field==="falla");
+    const inp=document.createElement(isTA?"textarea":"input");
+    if(!isTA) inp.type=type;
+    inp.value=inputVal;
+    inp.style.cssText="width:100%;padding:.5rem;border:1.5px solid #2563eb;border-radius:6px;font-size:.9rem;margin-bottom:.5rem;outline:none;background:#f8fafc"+(isTA?";min-height:80px;resize:vertical":"");
+    div.appendChild(inp);
+    const row=document.createElement("div");
+    row.style.cssText="display:flex;gap:.4rem;justify-content:flex-end";
+    const bc=document.createElement("button");
+    bc.textContent="Cancelar"; bc.style.cssText="padding:.35rem .7rem;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-size:.78rem;background:#fff;color:#64748b";
+    bc.onclick=()=>{ div.remove(); resolve(null); };
+    const bo=document.createElement("button");
+    bo.textContent="Guardar"; bo.style.cssText="padding:.35rem .7rem;border:none;border-radius:6px;cursor:pointer;font-size:.78rem;background:#2563eb;color:#fff;font-weight:700";
+    bo.onclick=()=>{ div.remove(); resolve(inp.value); };
+    row.appendChild(bc); row.appendChild(bo); div.appendChild(row);
+    document.body.appendChild(div);
+    inp.focus(); if(inp.select) inp.select();
+    inp.addEventListener("keydown",e=>{ if(e.key==="Enter"&&!isTA){ div.remove(); resolve(inp.value); } if(e.key==="Escape"){ div.remove(); resolve(null); } });
+  });
 }
 
-// ── Auto-calcular total ───────────────────────────────────
-function autoTotal(){
-  const precio = Number($("f-precio").value)||0;
-  const cant   = Number($("f-cantidad").value)||1;
-  $("f-total").value = precio * cant;
+function renderTable(records){
+  const tbody=$("tbody");
+  tbody.innerHTML="";
+  if(!records.length){ tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`; return; }
+  records.forEach(r=>{
+    const tr=document.createElement("tr");
+    const ec=(f,v)=>`onclick="editCell('${r.id}','${f}','${(v||'').toString().replace(/'/g,"&#39;")}')" title="Tocar para editar"`;
+    tr.innerHTML=`
+      <td class="col-serial editable" ${ec("serial",r.serial)}>${r.serial||"-"}</td>
+      <td class="col-detalle editable" ${ec("detalle",r.detalle)}>${r.detalle||"-"}</td>
+      <td class="col-falla editable" ${ec("falla",r.falla)}>${r.falla||"-"}</td>
+      <td class="col-trabajo editable" ${ec("trabajo",r.trabajo)}>${r.trabajo||"-"}</td>
+      <td class="editable" ${ec("cliente",r.cliente)}>${r.cliente||"-"}</td>
+      <td class="editable" ${ec("estado",r.estado)}>${badgeEstado(r.estado)}</td>
+      <td class="col-fecha editable" ${ec("fechaRecibido",r.fechaRecibido)}>${r.fechaRecibido||"-"}</td>
+      <td class="col-fecha editable" ${ec("fechaRetiro",r.fechaRetiro)}>${r.fechaRetiro||"-"}</td>
+      <td class="editable" ${ec("estadoPago",r.estadoPago)}>${badgePago(r.estadoPago)}</td>
+      <td class="col-num editable" ${ec("total",r.total)}><strong>${fmtMoney(r.total)}</strong></td>
+      <td class="col-acciones">
+        <button class="btn-icon btn-edit" onclick="openEdit('${r.id}')" title="Editar todo">✏️</button>
+        <button class="btn-icon btn-del"  onclick="confirmDeleteRep('${r.id}')" title="Eliminar">🗑️</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
 }
 
-// ── Export CSV ────────────────────────────────────────────
+function updateStats(records){
+  const total   = records.reduce((s,r)=>s+(Number(r.total)||0),0);
+  const cobrado = records.filter(r=>(r.estadoPago||"").toUpperCase()==="PAGADO").reduce((s,r)=>s+(Number(r.total)||0),0);
+  const pend    = records.filter(r=>(r.estado||"").toLowerCase()==="pendiente").length;
+  $("stat-total").textContent  = fmtMoney(total);
+  $("stat-cobrado").textContent= fmtMoney(cobrado);
+  $("stat-items").textContent  = records.length;
+  $("stat-pend").textContent   = pend;
+}
+
+function applyFilter(){
+  const q=$("search").value.toLowerCase().trim(), est=$("filter-estado").value, pago=$("filter-pago").value;
+  const res=allRecords.filter(r=>{
+    const mQ=!q||[r.serial,r.detalle,r.falla,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
+    const mE=!est||r.estado===est;
+    const mP=!pago||(r.estadoPago||"").toUpperCase()===pago.toUpperCase();
+    return mQ&&mE&&mP;
+  });
+  renderTable(res); updateStats(res);
+}
+
+function openNew(){
+  editingId=null;
+  $("modal-title").textContent="Nueva Reparación";
+  ["f-serial","f-falla","f-detalle","f-trabajo","f-cliente"].forEach(id=>$(id).value="");
+  ["f-gastos","f-precio","f-cantidad"].forEach(id=>$(id).value=0); $("f-cantidad").value=1;
+  $("f-total").value=0; $("f-estado").value=""; $("f-fRec").value=""; $("f-fRet").value=""; $("f-pago").value="";
+  $("modal-rep").classList.add("open");
+}
+
+window.openEdit = async function(id){
+  const r=allRecords.find(x=>x.id===id); if(!r) return;
+  editingId=id;
+  $("modal-title").textContent="Editar Reparación";
+  $("f-serial").value=r.serial||""; $("f-falla").value=r.falla||""; $("f-detalle").value=r.detalle||"";
+  $("f-trabajo").value=r.trabajo||""; $("f-gastos").value=r.gastosRepuestos||0;
+  $("f-precio").value=r.precioUnitario||0; $("f-cantidad").value=r.cantidad||1;
+  $("f-cliente").value=r.cliente||""; $("f-estado").value=r.estado||"";
+  $("f-fRec").value=toInputDate(r.fechaRecibido); $("f-fRet").value=toInputDate(r.fechaRetiro);
+  $("f-pago").value=normalizePago(r.estadoPago); $("f-total").value=r.total||0;
+  $("modal-rep").classList.add("open");
+};
+
+function closeModalRep(){ $("modal-rep").classList.remove("open"); }
+
+async function saveRecord(){
+  const data={
+    serial:$("f-serial").value.trim(), falla:$("f-falla").value.trim(),
+    detalle:$("f-detalle").value.trim(), trabajo:$("f-trabajo").value.trim(),
+    gastosRepuestos:Number($("f-gastos").value)||0, precioUnitario:Number($("f-precio").value)||0,
+    cantidad:Number($("f-cantidad").value)||1, cliente:$("f-cliente").value.trim(),
+    estado:$("f-estado").value, fechaRecibido:fromInputDate($("f-fRec").value),
+    fechaRetiro:fromInputDate($("f-fRet").value), estadoPago:$("f-pago").value,
+    total:Number($("f-total").value)||0,
+  };
+  if(!data.detalle){ showToast("El detalle es obligatorio","error"); return; }
+  try{
+    if(editingId){ await updateDoc(doc(db,"reparaciones",editingId),data); showToast("Actualizado ✔","ok"); }
+    else { await addDoc(collection(db,"reparaciones"),data); showToast("Guardado ✔","ok"); }
+    closeModalRep(); loadRecords();
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+window.confirmDeleteRep=function(id){ if(confirm("¿Eliminar reparación?")) deleteRep(id); }
+async function deleteRep(id){
+  try{ await deleteDoc(doc(db,"reparaciones",id)); showToast("Eliminado","ok"); loadRecords(); }
+  catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+function autoTotal(){ $("f-total").value=(Number($("f-precio").value)||0)*(Number($("f-cantidad").value)||1); }
+
 function exportCSV(){
-  const headers = ["Serial","Detalle","Falla reportada","Trabajo realizado","Cliente","Estado","Fecha recibido","Fecha retiro","Estado Pago","Total"];
-  const rows = allRecords.map(r=>[
-    r.serial,r.detalle,r.falla,r.trabajo,r.cliente,r.estado,r.fechaRecibido,r.fechaRetiro,r.estadoPago,r.total
-  ].map(v=> `"${(v||"").toString().replace(/"/g,'""')}"`).join(","));
-  const csv = [headers.join(","),...rows].join("\n");
-  const a = document.createElement("a");
-  a.href = "data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);
-  a.download = "reparaciones_export.csv";
-  a.click();
+  const h=["Serial","Detalle","Falla","Trabajo","Cliente","Estado","F.Recibido","F.Retiro","EstPago","Total"];
+  const rows=allRecords.map(r=>[r.serial,r.detalle,r.falla,r.trabajo,r.cliente,r.estado,r.fechaRecibido,r.fechaRetiro,r.estadoPago,r.total].map(v=>`"${(v||"").toString().replace(/"/g,'""')}"`).join(","));
+  const a=document.createElement("a");
+  a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent([h.join(","),...rows].join("\n"));
+  a.download="reparaciones.csv"; a.click();
 }
 
-// ── Login ────────────────────────────────────────────────
-const PASSWORD = "JMM2025";
-const SESSION_KEY = "jmm_auth";
-
-function checkAuth(){
-  return localStorage.getItem(SESSION_KEY) === "ok";
+// ══════════════════════════════════════════════════════════
+// ── CLIENTES ──────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+async function loadClientes(){
+  showLoading(true);
+  try{
+    const snap=await getDocs(collection(db,"clientes"));
+    allClientes=[];
+    snap.forEach(d=>allClientes.push({id:d.id,...d.data()}));
+    allClientes.sort((a,b)=>(a.nombre||"").localeCompare(b.nombre||""));
+    renderClientes(allClientes);
+  }catch(e){ showToast("Error clientes: "+e.message,"error"); }
+  showLoading(false);
 }
 
+function renderClientes(list){
+  const c=$("clientes-list");
+  c.innerHTML="";
+  if(!list.length){ c.innerHTML=`<div style="text-align:center;padding:2rem;color:#888">Sin clientes registrados</div>`; return; }
+  list.forEach(cl=>{
+    const card=document.createElement("div");
+    card.className="cliente-card";
+    card.innerHTML=`
+      <div class="cliente-nombre">👤 ${cl.nombre||"-"}</div>
+      <div class="cliente-datos">
+        ${cl.telefono?`<span>📞 ${cl.telefono}</span>`:""}
+        ${cl.email?`<span>✉️ ${cl.email}</span>`:""}
+        ${cl.direccion?`<span>📍 ${cl.direccion}</span>`:""}
+        ${cl.dni?`<span>🪪 DNI: ${cl.dni}</span>`:""}
+        ${cl.notas?`<div class="cliente-notas">📝 ${cl.notas}</div>`:""}
+      </div>
+      <div class="cliente-reps">
+        Reparaciones: <strong>${allRecords.filter(r=>(r.cliente||"").toLowerCase()===(cl.nombre||"").toLowerCase()).length}</strong>
+      </div>
+      <div class="cliente-actions">
+        <button class="btn-icon btn-edit" onclick="openEditCliente('${cl.id}')" title="Editar">✏️</button>
+        <button class="btn-icon btn-del" onclick="confirmDeleteCliente('${cl.id}')" title="Eliminar">🗑️</button>
+      </div>`;
+    c.appendChild(card);
+  });
+}
+
+function filterClientes(){
+  const q=$("search-clientes").value.toLowerCase().trim();
+  renderClientes(!q?allClientes:allClientes.filter(c=>[c.nombre,c.telefono,c.email,c.dni].some(v=>(v||"").toLowerCase().includes(q))));
+}
+
+function openNewCliente(){
+  editingClienteId=null;
+  $("modal-cliente-title").textContent="Nuevo Cliente";
+  ["fc-nombre","fc-telefono","fc-email","fc-direccion","fc-dni","fc-notas"].forEach(id=>$(id).value="");
+  $("modal-cliente").classList.add("open");
+}
+window.openEditCliente=function(id){
+  const c=allClientes.find(x=>x.id===id); if(!c) return;
+  editingClienteId=id;
+  $("modal-cliente-title").textContent="Editar Cliente";
+  $("fc-nombre").value=c.nombre||""; $("fc-telefono").value=c.telefono||"";
+  $("fc-email").value=c.email||""; $("fc-direccion").value=c.direccion||"";
+  $("fc-dni").value=c.dni||""; $("fc-notas").value=c.notas||"";
+  $("modal-cliente").classList.add("open");
+};
+function closeModalCliente(){ $("modal-cliente").classList.remove("open"); }
+
+async function saveCliente(){
+  const data={
+    nombre:$("fc-nombre").value.trim(), telefono:$("fc-telefono").value.trim(),
+    email:$("fc-email").value.trim(), direccion:$("fc-direccion").value.trim(),
+    dni:$("fc-dni").value.trim(), notas:$("fc-notas").value.trim(),
+  };
+  if(!data.nombre){ showToast("El nombre es obligatorio","error"); return; }
+  try{
+    if(editingClienteId){ await updateDoc(doc(db,"clientes",editingClienteId),data); showToast("Cliente actualizado ✔","ok"); }
+    else { await addDoc(collection(db,"clientes"),data); showToast("Cliente guardado ✔","ok"); }
+    closeModalCliente(); loadClientes();
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+window.confirmDeleteCliente=function(id){ if(confirm("¿Eliminar cliente?")) deleteCliente(id); }
+async function deleteCliente(id){
+  try{ await deleteDoc(doc(db,"clientes",id)); showToast("Eliminado","ok"); loadClientes(); }
+  catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+// ══════════════════════════════════════════════════════════
+// ── GASTOS ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+async function loadGastos(){
+  showLoading(true);
+  try{
+    const snap=await getDocs(collection(db,"gastos"));
+    allGastos=[];
+    snap.forEach(d=>allGastos.push({id:d.id,...d.data()}));
+    allGastos.sort((a,b)=>parseDate(b.fecha)-parseDate(a.fecha));
+    renderGastos(allGastos);
+    updateStatsGastos(allGastos);
+  }catch(e){ showToast("Error gastos: "+e.message,"error"); }
+  showLoading(false);
+}
+
+function renderGastos(list){
+  const tbody=$("tbody-gastos");
+  tbody.innerHTML="";
+  if(!list.length){ tbody.innerHTML=`<tr><td colspan="6" style="text-align:center;padding:2rem;color:#888">Sin gastos registrados</td></tr>`; return; }
+  list.forEach(g=>{
+    const tr=document.createElement("tr");
+    tr.innerHTML=`
+      <td class="col-fecha">${g.fecha||"-"}</td>
+      <td style="font-weight:600">${g.detalle||"-"}</td>
+      <td>${g.categoria||"-"}</td>
+      <td class="col-num">${g.cantidad||1}</td>
+      <td class="col-num" style="color:#dc2626"><strong>${fmtMoney(g.monto)}</strong></td>
+      <td class="col-num" style="color:#dc2626"><strong>${fmtMoney((Number(g.monto)||0)*(Number(g.cantidad)||1))}</strong></td>
+      <td class="col-acciones">
+        <button class="btn-icon btn-edit" onclick="openEditGasto('${g.id}')" title="Editar">✏️</button>
+        <button class="btn-icon btn-del" onclick="confirmDeleteGasto('${g.id}')" title="Eliminar">🗑️</button>
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+function updateStatsGastos(list){
+  const total=list.reduce((s,g)=>s+(Number(g.monto)||0)*(Number(g.cantidad)||1),0);
+  const mes=new Date().getMonth(), anio=new Date().getFullYear();
+  const totalMes=list.filter(g=>{
+    const p=parseDate(g.fecha); const d=new Date(p);
+    return d.getMonth()===mes&&d.getFullYear()===anio;
+  }).reduce((s,g)=>s+(Number(g.monto)||0)*(Number(g.cantidad)||1),0);
+  $("gstat-total").textContent=fmtMoney(total);
+  $("gstat-mes").textContent=fmtMoney(totalMes);
+  $("gstat-items").textContent=list.length;
+}
+
+function filterGastos(){
+  const q=$("search-gastos").value.toLowerCase().trim();
+  renderGastos(!q?allGastos:allGastos.filter(g=>[g.detalle,g.categoria].some(v=>(v||"").toLowerCase().includes(q))));
+}
+
+function openNewGasto(){
+  editingGastoId=null;
+  $("modal-gasto-title").textContent="Nuevo Gasto";
+  ["fg-detalle","fg-categoria","fg-notas"].forEach(id=>$(id).value="");
+  $("fg-cantidad").value=1; $("fg-monto").value=0;
+  $("fg-fecha").value=new Date().toISOString().slice(0,10);
+  $("modal-gasto").classList.add("open");
+}
+window.openEditGasto=function(id){
+  const g=allGastos.find(x=>x.id===id); if(!g) return;
+  editingGastoId=id;
+  $("modal-gasto-title").textContent="Editar Gasto";
+  $("fg-detalle").value=g.detalle||""; $("fg-categoria").value=g.categoria||"";
+  $("fg-cantidad").value=g.cantidad||1; $("fg-monto").value=g.monto||0;
+  $("fg-fecha").value=toInputDate(g.fecha); $("fg-notas").value=g.notas||"";
+  $("modal-gasto").classList.add("open");
+};
+function closeModalGasto(){ $("modal-gasto").classList.remove("open"); }
+
+async function saveGasto(){
+  const data={
+    detalle:$("fg-detalle").value.trim(), categoria:$("fg-categoria").value.trim(),
+    cantidad:Number($("fg-cantidad").value)||1, monto:Number($("fg-monto").value)||0,
+    fecha:fromInputDate($("fg-fecha").value), notas:$("fg-notas").value.trim(),
+  };
+  if(!data.detalle){ showToast("El detalle es obligatorio","error"); return; }
+  try{
+    if(editingGastoId){ await updateDoc(doc(db,"gastos",editingGastoId),data); showToast("Gasto actualizado ✔","ok"); }
+    else { await addDoc(collection(db,"gastos"),data); showToast("Gasto guardado ✔","ok"); }
+    closeModalGasto(); loadGastos();
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+window.confirmDeleteGasto=function(id){ if(confirm("¿Eliminar gasto?")) deleteGasto(id); }
+async function deleteGasto(id){
+  try{ await deleteDoc(doc(db,"gastos",id)); showToast("Eliminado","ok"); loadGastos(); }
+  catch(e){ showToast("Error: "+e.message,"error"); }
+}
+
+// ── UI helpers ────────────────────────────────────────────
+function showLoading(v){ $("loading").style.display=v?"flex":"none"; }
+function showToast(msg,type){
+  const t=$("toast"); t.textContent=msg;
+  t.className="toast "+(type==="error"?"toast-error":"toast-ok");
+  t.style.display="block"; setTimeout(()=>t.style.display="none",3000);
+}
+
+// ── Login ─────────────────────────────────────────────────
+const PASSWORD="JMM2025", SESSION_KEY="jmm_auth";
+function checkAuth(){ return localStorage.getItem(SESSION_KEY)==="ok"; }
 function doLogin(){
-  const val = $("login-input").value;
-  if(val === PASSWORD){
+  const val=$("login-input").value;
+  if(val===PASSWORD){
     localStorage.setItem(SESSION_KEY,"ok");
-    $("login-screen").style.display = "none";
-    $("app").style.display = "block";
-    initApp();
+    $("login-screen").style.display="none"; $("app").style.display="block"; initApp();
   } else {
-    $("login-error").style.display = "block";
-    $("login-input").value = "";
-    $("login-input").focus();
-    setTimeout(()=>{ $("login-error").style.display="none"; }, 2500);
+    $("login-error").style.display="block"; $("login-input").value=""; $("login-input").focus();
+    setTimeout(()=>$("login-error").style.display="none",2500);
   }
 }
 
 function initApp(){
   loadRecords();
-  $("search").addEventListener("input", applyFilter);
-  $("filter-estado").addEventListener("change", applyFilter);
-  $("filter-pago").addEventListener("change", applyFilter);
-  $("btn-new").addEventListener("click", openNew);
-  $("btn-save").addEventListener("click", saveRecord);
-  $("btn-cancel").addEventListener("click", closeModal);
-  $("btn-export").addEventListener("click", exportCSV);
-  $("btn-refresh").addEventListener("click", loadRecords);
-  $("btn-import").addEventListener("click", importExcel);
-  // Capturar archivo en mobile (el files[] puede estar vacío al hacer click en el botón)
-  $("import-file").addEventListener("change", function(){
-    pendingImportFile = this.files[0] || null;
-  });
-  $("f-precio").addEventListener("input", autoTotal);
-  $("f-cantidad").addEventListener("input", autoTotal);
-  $("modal").addEventListener("click", e=>{ if(e.target===$("modal")) closeModal(); });
-  $("btn-logout").addEventListener("click", ()=>{
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    location.reload();
-  });
+  $("search").addEventListener("input",applyFilter);
+  $("filter-estado").addEventListener("change",applyFilter);
+  $("filter-pago").addEventListener("change",applyFilter);
+  $("btn-new").addEventListener("click",openNew);
+  $("btn-save-rep").addEventListener("click",saveRecord);
+  $("btn-cancel-rep").addEventListener("click",closeModalRep);
+  $("btn-export").addEventListener("click",exportCSV);
+  $("btn-refresh").addEventListener("click",()=>switchTab(currentTab));
+  $("f-precio").addEventListener("input",autoTotal);
+  $("f-cantidad").addEventListener("input",autoTotal);
+  $("modal-rep").addEventListener("click",e=>{ if(e.target===$("modal-rep")) closeModalRep(); });
+  // Clientes
+  $("btn-new-cliente").addEventListener("click",openNewCliente);
+  $("btn-save-cliente").addEventListener("click",saveCliente);
+  $("btn-cancel-cliente").addEventListener("click",closeModalCliente);
+  $("search-clientes").addEventListener("input",filterClientes);
+  $("modal-cliente").addEventListener("click",e=>{ if(e.target===$("modal-cliente")) closeModalCliente(); });
+  // Gastos
+  $("btn-new-gasto").addEventListener("click",openNewGasto);
+  $("btn-save-gasto").addEventListener("click",saveGasto);
+  $("btn-cancel-gasto").addEventListener("click",closeModalGasto);
+  $("search-gastos").addEventListener("input",filterGastos);
+  $("modal-gasto").addEventListener("click",e=>{ if(e.target===$("modal-gasto")) closeModalGasto(); });
+  // Tabs
+  $("tab-reparaciones").addEventListener("click",()=>switchTab("reparaciones"));
+  $("tab-clientes").addEventListener("click",()=>switchTab("clientes"));
+  $("tab-gastos").addEventListener("click",()=>switchTab("gastos"));
+  // Logout
+  $("btn-logout").addEventListener("click",()=>{ localStorage.removeItem(SESSION_KEY); location.reload(); });
 }
 
-// ── Init ──────────────────────────────────────────────────
-window.addEventListener("DOMContentLoaded", ()=>{
-  if(checkAuth()){
-    $("login-screen").style.display = "none";
-    $("app").style.display = "block";
-    initApp();
-  }
-  $("btn-login").addEventListener("click", doLogin);
-  $("login-input").addEventListener("keydown", e=>{ if(e.key==="Enter") doLogin(); });
+window.addEventListener("DOMContentLoaded",()=>{
+  if(checkAuth()){ $("login-screen").style.display="none"; $("app").style.display="block"; initApp(); }
+  $("btn-login").addEventListener("click",doLogin);
+  $("login-input").addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); });
 });
 </script>
 
@@ -600,54 +542,58 @@ body{font-family:'Segoe UI',sans-serif;background:#f1f5f9;color:#1e293b;min-heig
 
 /* Header */
 header{background:linear-gradient(135deg,#111,#222);border-bottom:2px solid #c9a227;
-  padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;
+  padding:.75rem 1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;
   box-shadow:0 3px 14px #0005}
-header h1{font-size:1.2rem;font-weight:700;color:#c9a227;letter-spacing:.3px;display:flex;align-items:center;gap:.6rem;line-height:1.2}
-header h1 .ico{font-size:1.5rem;filter:drop-shadow(0 0 6px #c9a22780)}
+header h1{font-size:1.2rem;font-weight:700;color:#c9a227;display:flex;align-items:center;gap:.6rem;line-height:1.2}
+header h1 .ico{font-size:1.5rem}
 header h1 .brand{display:flex;flex-direction:column}
 header h1 .brand-name{color:#fff;font-size:1.1rem;font-weight:700}
 header h1 .brand-sub{font-size:.62rem;font-weight:400;color:#8a6f2e;letter-spacing:1.8px;text-transform:uppercase}
 
+/* Tabs */
+.tabs{display:flex;background:#fff;border-bottom:2px solid #e2e8f0;padding:0 1.5rem}
+.tab-btn{padding:.7rem 1.2rem;border:none;background:none;cursor:pointer;font-size:.85rem;font-weight:600;
+  color:#64748b;border-bottom:2px solid transparent;margin-bottom:-2px;transition:.15s}
+.tab-btn:hover{color:#2563eb}
+.tab-active{color:#2563eb!important;border-bottom-color:#2563eb!important}
+
 /* Stats */
 .stats{display:flex;gap:1rem;padding:1rem 1.5rem;flex-wrap:wrap}
 .stat-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem 1.25rem;
-  flex:1;min-width:130px;text-align:center;box-shadow:0 1px 4px #0001}
-.stat-card .val{font-size:1.4rem;font-weight:700;color:#1d4ed8}
+  flex:1;min-width:120px;text-align:center;box-shadow:0 1px 4px #0001}
+.stat-card .val{font-size:1.3rem;font-weight:700;color:#1d4ed8}
+.stat-card.red .val{color:#dc2626}
 .stat-card .lbl{font-size:.72rem;color:#64748b;margin-top:.2rem}
 
 /* Toolbar */
 .toolbar{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;padding:.75rem 1.5rem;
-  background:#fff;border-bottom:1px solid #e2e8f0;box-shadow:0 1px 3px #0001}
-input[type=text],select,input[type=file]{
-  background:#f8fafc;border:1px solid #cbd5e1;color:#1e293b;border-radius:6px;
+  background:#fff;border-bottom:1px solid #e2e8f0}
+input[type=text],select{background:#f8fafc;border:1px solid #cbd5e1;color:#1e293b;border-radius:6px;
   padding:.45rem .7rem;font-size:.82rem;outline:none}
 input[type=text]:focus,select:focus{border-color:#2563eb;background:#fff}
 input[type=text]{width:220px}
-.btn{padding:.45rem 1rem;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;
-  font-weight:600;transition:.15s}
+.btn{padding:.45rem 1rem;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;font-weight:600;transition:.15s}
 .btn-primary{background:#2563eb;color:#fff}.btn-primary:hover{background:#1d4ed8}
 .btn-success{background:#16a34a;color:#fff}.btn-success:hover{background:#15803d}
-.btn-outline{background:transparent;border:1px solid #c9a22760;color:#c9a227}.btn-outline:hover{border-color:#c9a227;background:#c9a22715;color:#e8c95a}
-.btn-orange{background:#ea580c;color:#fff}.btn-orange:hover{background:#c2410c}
+.btn-outline{background:transparent;border:1px solid #c9a22760;color:#c9a227}.btn-outline:hover{border-color:#c9a227;background:#c9a22715}
 
 /* Table */
 .table-wrap{overflow-x:auto;padding:0 1.5rem 1.5rem}
-table{width:100%;border-collapse:collapse;font-size:.8rem;min-width:900px;background:#fff;
+table{width:100%;border-collapse:collapse;font-size:.8rem;min-width:800px;background:#fff;
   border-radius:10px;overflow:hidden;box-shadow:0 1px 4px #0001;margin-top:1rem}
 thead th{background:#2563eb;padding:.6rem .7rem;text-align:left;font-size:.72rem;
-  text-transform:uppercase;letter-spacing:.5px;color:#dbeafe;position:sticky;top:0;
-  border-bottom:2px solid #1d4ed8;white-space:nowrap}
+  text-transform:uppercase;letter-spacing:.5px;color:#dbeafe;white-space:nowrap}
 tbody tr{border-bottom:1px solid #f1f5f9}
 tbody tr:hover{background:#eff6ff}
 td{padding:.55rem .7rem;vertical-align:top;color:#334155}
 .col-serial{white-space:nowrap;font-size:.75rem;color:#64748b;font-family:monospace}
 .col-detalle{max-width:140px;font-weight:600;color:#1e293b}
-.col-falla{max-width:160px;color:#7c3aed;font-size:.75rem;word-break:break-word}
-td.editable:hover{background:#eff6ff;outline:1px dashed #93c5fd;cursor:pointer}
-.col-trabajo{max-width:220px;color:#64748b;font-size:.75rem;word-break:break-word}
+.col-falla{max-width:150px;color:#7c3aed;font-size:.75rem;word-break:break-word}
+.col-trabajo{max-width:200px;color:#64748b;font-size:.75rem;word-break:break-word}
 .col-num{text-align:right;white-space:nowrap;color:#15803d;font-weight:600}
 .col-fecha{white-space:nowrap;font-size:.75rem;color:#64748b}
 .col-acciones{white-space:nowrap}
+td.editable:hover{background:#eff6ff;outline:1px dashed #93c5fd;cursor:pointer}
 
 /* Badges */
 .badge{display:inline-block;padding:.15rem .5rem;border-radius:999px;font-size:.68rem;font-weight:600}
@@ -663,9 +609,18 @@ td.editable:hover{background:#eff6ff;outline:1px dashed #93c5fd;cursor:pointer}
 .btn-edit:hover{background:#dbeafe}
 .btn-del:hover{background:#fee2e2}
 
+/* Clientes */
+.clientes-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:1rem;padding:1rem 1.5rem}
+.cliente-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:1rem;box-shadow:0 1px 4px #0001;position:relative}
+.cliente-nombre{font-size:1rem;font-weight:700;color:#1e293b;margin-bottom:.5rem}
+.cliente-datos{display:flex;flex-direction:column;gap:.2rem;font-size:.8rem;color:#64748b}
+.cliente-datos span{display:flex;align-items:center;gap:.3rem}
+.cliente-notas{margin-top:.4rem;font-size:.75rem;color:#94a3b8;font-style:italic}
+.cliente-reps{margin-top:.5rem;font-size:.75rem;color:#2563eb;border-top:1px solid #f1f5f9;padding-top:.4rem}
+.cliente-actions{position:absolute;top:.75rem;right:.75rem;display:flex;gap:.2rem}
+
 /* Modal */
-.modal-overlay{display:none;position:fixed;inset:0;background:#00000060;z-index:100;
-  align-items:center;justify-content:center}
+.modal-overlay{display:none;position:fixed;inset:0;background:#00000060;z-index:100;align-items:center;justify-content:center}
 .modal-overlay.open{display:flex}
 .modal-box{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:1.5rem;
   width:min(96vw,560px);max-height:90vh;overflow-y:auto;box-shadow:0 8px 32px #0003}
@@ -680,16 +635,10 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
 .form-grid textarea{resize:vertical;min-height:60px}
 .modal-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem}
 
-/* Import section */
-.import-bar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
-.import-bar label{font-size:.75rem;color:#64748b;white-space:nowrap;font-weight:600}
-
 /* Loading */
 #loading{display:none;position:fixed;bottom:0;left:0;right:0;background:#2563ebee;z-index:200;
-  align-items:center;justify-content:center;flex-direction:row;gap:.75rem;
-  padding:.7rem 1.5rem;height:54px}
-.spinner{width:24px;height:24px;border:3px solid #93c5fd;border-top-color:#fff;
-  border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
+  align-items:center;justify-content:center;flex-direction:row;gap:.75rem;padding:.7rem 1.5rem;height:54px}
+.spinner{width:24px;height:24px;border:3px solid #93c5fd;border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 #loading span{color:#fff;font-size:.85rem;font-weight:600}
 
@@ -699,10 +648,8 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
 .toast-ok{background:#16a34a;color:#fff}
 .toast-error{background:#dc2626;color:#fff}
 
-
-/* Login screen */
-#login-screen{display:flex;position:fixed;inset:0;z-index:9999;background:#ffffff;
-  align-items:center;justify-content:center;flex-direction:column}
+/* Login */
+#login-screen{display:flex;position:fixed;inset:0;z-index:9999;background:#fff;align-items:center;justify-content:center}
 .login-box{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:2.5rem 2rem;
   width:min(90vw,360px);text-align:center;box-shadow:0 4px 24px #0001}
 .login-logo{font-size:3rem;margin-bottom:.3rem}
@@ -712,29 +659,24 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
 .login-input-wrap{position:relative;margin-bottom:1.2rem}
 #login-input{width:100%;background:#f8fafc;border:1.5px solid #cbd5e1;color:#1e293b;
   border-radius:8px;padding:.65rem 2.5rem .65rem .8rem;font-size:.95rem;outline:none;letter-spacing:2px;text-align:center}
-#login-input:focus{border-color:#2563eb;box-shadow:0 0 0 3px #2563eb20;background:#fff}
-#toggle-pw{position:absolute;right:.7rem;top:50%;transform:translateY(-50%);
-  background:none;border:none;cursor:pointer;color:#94a3b8;font-size:1rem;padding:0}
-#btn-login{width:100%;padding:.7rem;background:#2563eb;
-  border:none;border-radius:8px;color:#fff;font-weight:700;font-size:.95rem;cursor:pointer;
-  letter-spacing:.5px;transition:.2s;margin-top:.2rem}
-#btn-login:hover{background:#1d4ed8;box-shadow:0 4px 14px #2563eb40}
-#login-error{display:none;background:#fee2e2;color:#dc2626;border-radius:6px;
-  padding:.45rem .7rem;font-size:.78rem;margin-top:.8rem;font-weight:600;border:1px solid #fca5a5}
+#login-input:focus{border-color:#2563eb}
+#toggle-pw{position:absolute;right:.7rem;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:#94a3b8}
+#btn-login{width:100%;padding:.7rem;background:#2563eb;border:none;border-radius:8px;color:#fff;font-weight:700;font-size:.95rem;cursor:pointer;margin-top:.2rem}
+#btn-login:hover{background:#1d4ed8}
+#login-error{display:none;background:#fee2e2;color:#dc2626;border-radius:6px;padding:.45rem .7rem;font-size:.78rem;margin-top:.8rem;font-weight:600}
 
-/* Responsive */
 @media(max-width:600px){
   .form-grid{grid-template-columns:1fr}
   .form-grid .full{grid-column:1}
   input[type=text]{width:150px}
   .stats{gap:.5rem}
-  .stat-card .val{font-size:1.1rem}
+  .clientes-grid{grid-template-columns:1fr}
 }
 </style>
 </head>
 <body>
 
-<!-- Login Screen -->
+<!-- Login -->
 <div id="login-screen">
   <div class="login-box">
     <div class="login-logo">💡</div>
@@ -750,16 +692,11 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
   </div>
 </div>
 
-<!-- App (hidden until login) -->
+<!-- App -->
 <div id="app" style="display:none">
-
-<!-- Loading overlay -->
 <div id="loading"><div class="spinner"></div><span>Cargando...</span></div>
-
-<!-- Toast -->
 <div id="toast"></div>
 
-<!-- Header -->
 <header>
   <h1>
     <span class="ico">💡</span>
@@ -771,156 +708,161 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
   <div style="display:flex;gap:.5rem;flex-wrap:wrap">
     <button class="btn btn-outline" id="btn-refresh">🔄 Actualizar</button>
     <button class="btn btn-success" id="btn-new">+ Nueva Reparación</button>
-    <button class="btn" id="btn-logout" style="background:#7f1d1d;color:#fca5a5;border:none" title="Cerrar sesión">🚪 Salir</button>
+    <button class="btn" id="btn-logout" style="background:#7f1d1d;color:#fca5a5;border:none">🚪 Salir</button>
   </div>
 </header>
 
-<!-- Stats -->
-<div class="stats">
-  <div class="stat-card"><div class="val" id="stat-items">-</div><div class="lbl">Registros</div></div>
-  <div class="stat-card"><div class="val" id="stat-total">-</div><div class="lbl">Total facturado</div></div>
-  <div class="stat-card"><div class="val" id="stat-cobrado">-</div><div class="lbl">Cobrado (PAGADO)</div></div>
-  <div class="stat-card"><div class="val" id="stat-pend">-</div><div class="lbl">Pendientes</div></div>
+<!-- Tabs -->
+<div class="tabs">
+  <button class="tab-btn tab-active" id="tab-reparaciones">🔧 Reparaciones</button>
+  <button class="tab-btn" id="tab-clientes">👤 Clientes</button>
+  <button class="tab-btn" id="tab-gastos">💸 Gastos</button>
 </div>
 
-<!-- Toolbar -->
-<div class="toolbar">
-  <input type="text" id="search" placeholder="🔍 Buscar detalle, trabajo, cliente…"/>
-
-  <select id="filter-estado">
-    <option value="">Todos los estados</option>
-    <option>Retirado</option>
-    <option>Reparado</option>
-    <option>Pendiente</option>
-    <option>No acepto presupuesto</option>
-    <option>-</option>
-  </select>
-
-  <select id="filter-pago">
-    <option value="">Todos los pagos</option>
-    <option value="PAGADO">PAGADO</option>
-    <option value="Pendiente">Pendiente</option>
-  </select>
-
-  <button class="btn btn-outline" id="btn-export">📥 Exportar CSV</button>
-
-  <div class="import-bar">
-    <label>Importar XLSX:</label>
-    <input type="file" id="import-file" accept=".xlsx,.xls"/>
-    <button class="btn btn-orange" id="btn-import">⬆ Importar</button>
+<!-- ═══ SECCIÓN REPARACIONES ═══ -->
+<div id="section-reparaciones">
+  <div class="stats">
+    <div class="stat-card"><div class="val" id="stat-items">-</div><div class="lbl">Registros</div></div>
+    <div class="stat-card"><div class="val" id="stat-total">-</div><div class="lbl">Total facturado</div></div>
+    <div class="stat-card"><div class="val" id="stat-cobrado">-</div><div class="lbl">Cobrado</div></div>
+    <div class="stat-card"><div class="val" id="stat-pend">-</div><div class="lbl">Pendientes</div></div>
+  </div>
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="🔍 Buscar…"/>
+    <select id="filter-estado">
+      <option value="">Todos los estados</option>
+      <option>Retirado</option><option>Reparado</option><option>Pendiente</option>
+      <option>No acepto presupuesto</option><option>-</option>
+    </select>
+    <select id="filter-pago">
+      <option value="">Todos los pagos</option>
+      <option value="PAGADO">PAGADO</option><option value="Pendiente">Pendiente</option>
+    </select>
+    <button class="btn btn-outline" id="btn-export">📥 CSV</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Serial</th><th>Detalle</th><th>Falla reportada</th><th>Trabajo realizado</th>
+        <th>Cliente</th><th>Estado</th><th>F. Recibido</th><th>F. Retiro</th>
+        <th>Estado Pago</th><th style="text-align:right">Total</th><th></th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
   </div>
 </div>
 
-<!-- Table -->
-<div class="table-wrap">
-<table>
-  <thead>
-    <tr>
-      <th>Serial</th>
-      <th>Detalle</th>
-      <th>Falla reportada</th>
-      <th>Trabajo realizado</th>
-      <th>Cliente</th>
-      <th>Estado</th>
-      <th>F. Recibido</th>
-      <th>F. Retiro</th>
-      <th>Estado Pago</th>
-      <th style="text-align:right">Total</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody id="tbody"></tbody>
-</table>
+<!-- ═══ SECCIÓN CLIENTES ═══ -->
+<div id="section-clientes" style="display:none">
+  <div class="toolbar">
+    <input type="text" id="search-clientes" placeholder="🔍 Buscar cliente…"/>
+    <button class="btn btn-success" id="btn-new-cliente">+ Nuevo Cliente</button>
+  </div>
+  <div class="clientes-grid" id="clientes-list"></div>
 </div>
 
-<!-- Modal -->
-<div class="modal-overlay" id="modal">
+<!-- ═══ SECCIÓN GASTOS ═══ -->
+<div id="section-gastos" style="display:none">
+  <div class="stats">
+    <div class="stat-card red"><div class="val" id="gstat-items">-</div><div class="lbl">Registros</div></div>
+    <div class="stat-card red"><div class="val" id="gstat-mes">-</div><div class="lbl">Este mes</div></div>
+    <div class="stat-card red"><div class="val" id="gstat-total">-</div><div class="lbl">Total gastos</div></div>
+  </div>
+  <div class="toolbar">
+    <input type="text" id="search-gastos" placeholder="🔍 Buscar gasto…"/>
+    <button class="btn btn-success" id="btn-new-gasto">+ Nuevo Gasto</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Fecha</th><th>Detalle</th><th>Categoría</th>
+        <th style="text-align:right">Cant.</th><th style="text-align:right">$ Unit.</th>
+        <th style="text-align:right">Total</th><th></th>
+      </tr></thead>
+      <tbody id="tbody-gastos"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Modal Reparación -->
+<div class="modal-overlay" id="modal-rep">
   <div class="modal-box">
     <h2 id="modal-title">Nueva Reparación</h2>
-    <div id="form-rep" class="form-grid">
-
-      <div class="full">
-        <label>Serial / N° de Serie</label>
-        <input type="text" id="f-serial" placeholder="Ej: SN-123456"/>
-      </div>
-
-      <div class="full">
-        <label>Detalle *</label>
-        <input type="text" id="f-detalle" placeholder="Ej: Tacho PLS 543"/>
-      </div>
-
-      <div class="full">
-        <label>Falla reportada</label>
-        <input type="text" id="f-falla" placeholder="Ej: No enciende, pantalla rota..."/>
-      </div>
-
-      <div class="full">
-        <label>Trabajo realizado</label>
-        <textarea id="f-trabajo" placeholder="Descripción del trabajo..."></textarea>
-      </div>
-
-      <div>
-        <label>Gastos repuestos ($)</label>
-        <input type="number" id="f-gastos" min="0" value="0"/>
-      </div>
-
-      <div>
-        <label>$ x Unidad</label>
-        <input type="number" id="f-precio" min="0" value="0"/>
-      </div>
-
-      <div>
-        <label>Cantidad</label>
-        <input type="number" id="f-cantidad" min="1" value="1"/>
-      </div>
-
-      <div>
-        <label>Total ($)</label>
-        <input type="number" id="f-total" min="0" value="0"/>
-      </div>
-
-      <div>
-        <label>Cliente</label>
-        <input type="text" id="f-cliente" placeholder="Nombre cliente"/>
-      </div>
-
-      <div>
-        <label>Estado</label>
+    <div class="form-grid">
+      <div class="full"><label>Serial / N° de Serie</label><input type="text" id="f-serial" placeholder="Ej: SN-123456"/></div>
+      <div class="full"><label>Detalle *</label><input type="text" id="f-detalle" placeholder="Ej: TV JVC 50"/></div>
+      <div class="full"><label>Falla reportada</label><input type="text" id="f-falla" placeholder="Ej: No enciende, pantalla rota..."/></div>
+      <div class="full"><label>Trabajo realizado</label><textarea id="f-trabajo" placeholder="Descripción del trabajo..."></textarea></div>
+      <div><label>Gastos repuestos ($)</label><input type="number" id="f-gastos" min="0" value="0"/></div>
+      <div><label>$ x Unidad</label><input type="number" id="f-precio" min="0" value="0"/></div>
+      <div><label>Cantidad</label><input type="number" id="f-cantidad" min="1" value="1"/></div>
+      <div><label>Total ($)</label><input type="number" id="f-total" min="0" value="0"/></div>
+      <div><label>Cliente</label><input type="text" id="f-cliente" placeholder="Nombre cliente"/></div>
+      <div><label>Estado</label>
         <select id="f-estado">
-          <option value="">-</option>
-          <option>Retirado</option>
-          <option>Reparado</option>
-          <option>Pendiente</option>
-          <option>No acepto presupuesto</option>
-          <option>-</option>
+          <option value="">-</option><option>Retirado</option><option>Reparado</option>
+          <option>Pendiente</option><option>No acepto presupuesto</option><option>-</option>
         </select>
       </div>
-
-      <div>
-        <label>Fecha recibido</label>
-        <input type="date" id="f-fRec"/>
-      </div>
-
-      <div>
-        <label>Fecha retiro</label>
-        <input type="date" id="f-fRet"/>
-      </div>
-
-      <div class="full">
-        <label>Estado Pago</label>
+      <div><label>Fecha recibido</label><input type="date" id="f-fRec"/></div>
+      <div><label>Fecha retiro</label><input type="date" id="f-fRet"/></div>
+      <div class="full"><label>Estado Pago</label>
         <select id="f-pago">
-          <option value="">-</option>
-          <option value="PAGADO">PAGADO</option>
+          <option value="">-</option><option value="PAGADO">PAGADO</option>
           <option value="Pendiente">Pendiente</option>
           <option value="no se quiso reparar">no se quiso reparar</option>
           <option value="No se la llevo, la deja">No se la llevo, la deja</option>
         </select>
       </div>
-
     </div>
     <div class="modal-actions">
-      <button class="btn btn-outline" id="btn-cancel">Cancelar</button>
-      <button class="btn btn-primary" id="btn-save">💾 Guardar</button>
+      <button class="btn btn-outline" id="btn-cancel-rep">Cancelar</button>
+      <button class="btn btn-primary" id="btn-save-rep">💾 Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Cliente -->
+<div class="modal-overlay" id="modal-cliente">
+  <div class="modal-box">
+    <h2 id="modal-cliente-title">Nuevo Cliente</h2>
+    <div class="form-grid">
+      <div class="full"><label>Nombre *</label><input type="text" id="fc-nombre" placeholder="Nombre completo"/></div>
+      <div><label>Teléfono</label><input type="text" id="fc-telefono" placeholder="Ej: 3404-123456"/></div>
+      <div><label>Email</label><input type="text" id="fc-email" placeholder="correo@ejemplo.com"/></div>
+      <div class="full"><label>Dirección</label><input type="text" id="fc-direccion" placeholder="Calle y número"/></div>
+      <div><label>DNI</label><input type="text" id="fc-dni" placeholder="Nº de documento"/></div>
+      <div></div>
+      <div class="full"><label>Notas</label><textarea id="fc-notas" placeholder="Observaciones del cliente..."></textarea></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="btn-cancel-cliente">Cancelar</button>
+      <button class="btn btn-primary" id="btn-save-cliente">💾 Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Gasto -->
+<div class="modal-overlay" id="modal-gasto">
+  <div class="modal-box">
+    <h2 id="modal-gasto-title">Nuevo Gasto</h2>
+    <div class="form-grid">
+      <div class="full"><label>Detalle *</label><input type="text" id="fg-detalle" placeholder="Ej: Soldador, capacitores..."/></div>
+      <div><label>Categoría</label>
+        <select id="fg-categoria">
+          <option value="">Sin categoría</option>
+          <option>Repuestos</option><option>Herramientas</option><option>Insumos</option>
+          <option>Envíos</option><option>Servicios</option><option>Otro</option>
+        </select>
+      </div>
+      <div><label>Fecha compra</label><input type="date" id="fg-fecha"/></div>
+      <div><label>Cantidad</label><input type="number" id="fg-cantidad" min="1" value="1"/></div>
+      <div><label>Monto unitario ($)</label><input type="number" id="fg-monto" min="0" value="0"/></div>
+      <div class="full"><label>Notas</label><textarea id="fg-notas" placeholder="Observaciones..."></textarea></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="btn-cancel-gasto">Cancelar</button>
+      <button class="btn btn-primary" id="btn-save-gasto">💾 Guardar</button>
     </div>
   </div>
 </div>
