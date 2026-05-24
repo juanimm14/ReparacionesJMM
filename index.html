@@ -76,9 +76,14 @@ async function loadRecords(){
     if(q || est || pago) applyFilter();
   }catch(e){
     console.error(e);
-    showToast("Error al cargar: "+e.message,"error");
-    // Mostrar tabla vacía para no quedar bloqueado
-    renderTable([]);
+    const msg = e.message||e.code||JSON.stringify(e);
+    showToast("Error al cargar: "+msg,"error");
+    // Mostrar el error visible en la tabla para debug en mobile
+    const tbody = $("tbody");
+    tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:2rem;color:#dc2626;font-weight:600;font-size:.85rem">
+      ⚠️ Error al cargar datos:<br><span style="font-family:monospace;font-size:.75rem;color:#7f1d1d">${msg}</span><br>
+      <span style="font-size:.72rem;color:#64748b;font-weight:400">Revisá las reglas de Firestore o la conexión</span>
+    </td></tr>`;
     updateStats([]);
   }
   showLoading(false);
