@@ -95,31 +95,130 @@ function parseDate(s){
   return new Date(y,m-1,d).getTime();
 }
 
+// ── Edición inline ───────────────────────────────────────
+window.editCell = async function(id, field, currentVal){
+  const r = allRecords.find(x=>x.id===id);
+  if(!r) return;
+  const selectOpts = {
+    estado:    ["","Retirado","Reparado","Pendiente","No acepto presupuesto","-"],
+    estadoPago:["","PAGADO","Pendiente","no se quiso reparar","No se la llevo, la deja"],
+  };
+  const dateFields = ["fechaRecibido","fechaRetiro"];
+  let newVal;
+  if(selectOpts[field]){
+    newVal = await showInlineSelect(field, currentVal, selectOpts[field]);
+  } else if(dateFields.includes(field)){
+    newVal = await showInlineInput(field, currentVal, "date");
+    if(newVal) newVal = fromInputDate(newVal);
+    else newVal = currentVal;
+  } else {
+    newVal = await showInlineInput(field, currentVal, "text");
+  }
+  if(newVal === null) return;
+  if(newVal === currentVal) return;
+  try{
+    await updateDoc(doc(db,"reparaciones",id), {[field]: newVal});
+    r[field] = newVal;
+    showToast("Guardado ✔","ok");
+    renderTable(allRecords);
+    updateStats(allRecords);
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+};
+
+function showInlineSelect(field, current, opts){
+  return new Promise(resolve=>{
+    document.getElementById("inline-popup")?.remove();
+    const labels = {estado:"Estado", estadoPago:"Estado de pago"};
+    const div = document.createElement("div");
+    div.id = "inline-popup";
+    div.style.cssText="position:fixed;z-index:500;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem;box-shadow:0 8px 32px #0004;min-width:200px;max-width:280px;top:50%;left:50%;transform:translate(-50%,-50%)";
+    const title = document.createElement("div");
+    title.style.cssText="font-size:.75rem;font-weight:700;color:#64748b;margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.5px";
+    title.textContent = "✏️ " + (labels[field]||field);
+    div.appendChild(title);
+    opts.forEach(o=>{
+      const btn = document.createElement("button");
+      btn.style.cssText="display:block;width:100%;text-align:left;padding:.4rem .6rem;border:none;border-radius:6px;cursor:pointer;font-size:.82rem;margin-bottom:.2rem;background:"+(o===current?"#dbeafe":"#f8fafc")+";color:"+(o===current?"#1d4ed8":"#334155")+";font-weight:"+(o===current?"700":"400");
+      btn.textContent = o||"(vacío)";
+      btn.onclick = ()=>{ div.remove(); resolve(o); };
+      div.appendChild(btn);
+    });
+    const cancel = document.createElement("button");
+    cancel.style.cssText="display:block;width:100%;text-align:center;padding:.4rem;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-size:.78rem;margin-top:.3rem;background:#fff;color:#64748b";
+    cancel.textContent = "Cancelar";
+    cancel.onclick = ()=>{ div.remove(); resolve(null); };
+    div.appendChild(cancel);
+    document.body.appendChild(div);
+    setTimeout(()=>{
+      document.addEventListener("click", function h(e){
+        if(!div.contains(e.target)){ div.remove(); resolve(null); document.removeEventListener("click",h); }
+      });
+    }, 100);
+  });
+}
+
+function showInlineInput(field, current, type){
+  return new Promise(resolve=>{
+    document.getElementById("inline-popup")?.remove();
+    const labels = {serial:"Serial",detalle:"Detalle",trabajo:"Trabajo realizado",falla:"Falla reportada",cliente:"Cliente",fechaRecibido:"Fecha recibido",fechaRetiro:"Fecha retiro",total:"Total ($)"};
+    const inputVal = type==="date" ? toInputDate(current) : (current||"");
+    const div = document.createElement("div");
+    div.id = "inline-popup";
+    div.style.cssText="position:fixed;z-index:500;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:.75rem;box-shadow:0 8px 32px #0004;min-width:240px;max-width:300px;top:50%;left:50%;transform:translate(-50%,-50%)";
+    const title = document.createElement("div");
+    title.style.cssText="font-size:.75rem;font-weight:700;color:#64748b;margin-bottom:.5rem;text-transform:uppercase;letter-spacing:.5px";
+    title.textContent = "✏️ " + (labels[field]||field);
+    div.appendChild(title);
+    const inp = document.createElement(type==="text"&&field==="trabajo"?"textarea":"input");
+    if(inp.tagName==="INPUT") inp.type = type;
+    inp.value = inputVal;
+    inp.style.cssText="width:100%;padding:.5rem;border:1.5px solid #2563eb;border-radius:6px;font-size:.9rem;margin-bottom:.5rem;outline:none;background:#f8fafc";
+    div.appendChild(inp);
+    const row = document.createElement("div");
+    row.style.cssText="display:flex;gap:.4rem;justify-content:flex-end";
+    const btnCancel = document.createElement("button");
+    btnCancel.textContent="Cancelar";
+    btnCancel.style.cssText="padding:.35rem .7rem;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;font-size:.78rem;background:#fff;color:#64748b";
+    btnCancel.onclick=()=>{ div.remove(); resolve(null); };
+    const btnOk = document.createElement("button");
+    btnOk.textContent="Guardar";
+    btnOk.style.cssText="padding:.35rem .7rem;border:none;border-radius:6px;cursor:pointer;font-size:.78rem;background:#2563eb;color:#fff;font-weight:700";
+    btnOk.onclick=()=>{ div.remove(); resolve(inp.value); };
+    row.appendChild(btnCancel); row.appendChild(btnOk);
+    div.appendChild(row);
+    document.body.appendChild(div);
+    inp.focus(); if(inp.select) inp.select();
+    inp.addEventListener("keydown",e=>{
+      if(e.key==="Enter"&&inp.tagName!=="TEXTAREA"){ div.remove(); resolve(inp.value); }
+      if(e.key==="Escape"){ div.remove(); resolve(null); }
+    });
+  });
+}
+
 // ── Renderizar tabla ──────────────────────────────────────
 function renderTable(records){
   const tbody = $("tbody");
   tbody.innerHTML = "";
   if(!records.length){
-    tbody.innerHTML=`<tr><td colspan="12" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`;
+    tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`;
     return;
   }
   records.forEach(r=>{
     const tr = document.createElement("tr");
+    const ec=(field,val)=>`onclick="editCell('${r.id}','${field}','${(val||'').toString().replace(/'/g,String.fromCharCode(39))}')" title="Tocar para editar"`;
     tr.innerHTML=`
-      <td class="col-serial">${r.serial||"-"}</td>
-      <td class="col-detalle">${r.detalle||"-"}</td>
-      <td class="col-trabajo">${r.trabajo||"-"}</td>
-      <td class="col-num">${fmtMoney(r.gastosRepuestos)}</td>
-      <td class="col-num">${fmtMoney(r.precioUnitario)}</td>
-      <td class="col-num">${r.cantidad||1}</td>
-      <td>${r.cliente||"-"}</td>
-      <td>${badgeEstado(r.estado)}</td>
-      <td class="col-fecha">${r.fechaRecibido||"-"}</td>
-      <td class="col-fecha">${r.fechaRetiro||"-"}</td>
-      <td>${badgePago(r.estadoPago)}</td>
-      <td class="col-num"><strong>${fmtMoney(r.total)}</strong></td>
+      <td class="col-serial editable" ${ec("serial",r.serial)}>${r.serial||"-"}</td>
+      <td class="col-detalle editable" ${ec("detalle",r.detalle)}>${r.detalle||"-"}</td>
+      <td class="col-falla editable" ${ec("falla",r.falla)}>${r.falla||"-"}</td>
+      <td class="col-trabajo editable" ${ec("trabajo",r.trabajo)}>${r.trabajo||"-"}</td>
+      <td class="editable" ${ec("cliente",r.cliente)}>${r.cliente||"-"}</td>
+      <td class="editable" ${ec("estado",r.estado)}>${badgeEstado(r.estado)}</td>
+      <td class="col-fecha editable" ${ec("fechaRecibido",r.fechaRecibido)}>${r.fechaRecibido||"-"}</td>
+      <td class="col-fecha editable" ${ec("fechaRetiro",r.fechaRetiro)}>${r.fechaRetiro||"-"}</td>
+      <td class="editable" ${ec("estadoPago",r.estadoPago)}>${badgePago(r.estadoPago)}</td>
+      <td class="col-num editable" ${ec("total",r.total)}><strong>${fmtMoney(r.total)}</strong></td>
       <td class="col-acciones">
-        <button class="btn-icon btn-edit" onclick="openEdit('${r.id}')" title="Editar">✏️</button>
+        <button class="btn-icon btn-edit" onclick="openEdit('${r.id}')" title="Editar todo">✏️</button>
         <button class="btn-icon btn-del"  onclick="confirmDelete('${r.id}')" title="Eliminar">🗑️</button>
       </td>`;
     tbody.appendChild(tr);
@@ -144,7 +243,7 @@ function applyFilter(){
   const est  = $("filter-estado").value;
   const pago = $("filter-pago").value;
   let res = allRecords.filter(r=>{
-    const matchQ = !q || [r.serial,r.detalle,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
+    const matchQ = !q || [r.serial,r.detalle,r.falla,r.trabajo,r.cliente].some(v=>(v||"").toLowerCase().includes(q));
     const matchE = !est || r.estado===est;
     const matchP = !pago || (r.estadoPago||"").toUpperCase()===(pago).toUpperCase();
     return matchQ && matchE && matchP;
@@ -159,6 +258,7 @@ function openNew(){
   $("modal-title").textContent="Nueva Reparación";
   // Limpiar campos manualmente (el contenedor es un div, no un form)
   $("f-serial").value   = "";
+  $("f-falla").value    = "";
   $("f-detalle").value  = "";
   $("f-trabajo").value  = "";
   $("f-gastos").value   = 0;
@@ -179,6 +279,7 @@ window.openEdit = async function(id){
   editingId = id;
   $("modal-title").textContent = "Editar Reparación";
   $("f-serial").value         = r.serial||"";
+  $("f-falla").value          = r.falla||"";
   $("f-detalle").value        = r.detalle||"";
   $("f-trabajo").value        = r.trabajo||"";
   $("f-gastos").value         = r.gastosRepuestos||0;
@@ -218,6 +319,7 @@ function closeModal(){
 async function saveRecord(){
   const data = {
     serial:          $("f-serial").value.trim(),
+    falla:           $("f-falla").value.trim(),
     detalle:         $("f-detalle").value.trim(),
     trabajo:         $("f-trabajo").value.trim(),
     gastosRepuestos: Number($("f-gastos").value)||0,
@@ -421,10 +523,9 @@ function autoTotal(){
 
 // ── Export CSV ────────────────────────────────────────────
 function exportCSV(){
-  const headers = ["Serial","Detalle","Trabajo realizado","Gastos repuestos","$ x unidad","Cantidad","Cliente","Estado","Fecha recibido","Fecha retiro","Estado Pago","Total"];
+  const headers = ["Serial","Detalle","Falla reportada","Trabajo realizado","Cliente","Estado","Fecha recibido","Fecha retiro","Estado Pago","Total"];
   const rows = allRecords.map(r=>[
-    r.serial,r.detalle,r.trabajo,r.gastosRepuestos,r.precioUnitario,r.cantidad,
-    r.cliente,r.estado,r.fechaRecibido,r.fechaRetiro,r.estadoPago,r.total
+    r.serial,r.detalle,r.falla,r.trabajo,r.cliente,r.estado,r.fechaRecibido,r.fechaRetiro,r.estadoPago,r.total
   ].map(v=> `"${(v||"").toString().replace(/"/g,'""')}"`).join(","));
   const csv = [headers.join(","),...rows].join("\n");
   const a = document.createElement("a");
@@ -540,7 +641,9 @@ tbody tr{border-bottom:1px solid #f1f5f9}
 tbody tr:hover{background:#eff6ff}
 td{padding:.55rem .7rem;vertical-align:top;color:#334155}
 .col-serial{white-space:nowrap;font-size:.75rem;color:#64748b;font-family:monospace}
-.col-detalle{max-width:150px;font-weight:600;color:#1e293b}
+.col-detalle{max-width:140px;font-weight:600;color:#1e293b}
+.col-falla{max-width:160px;color:#7c3aed;font-size:.75rem;word-break:break-word}
+td.editable:hover{background:#eff6ff;outline:1px dashed #93c5fd;cursor:pointer}
 .col-trabajo{max-width:220px;color:#64748b;font-size:.75rem;word-break:break-word}
 .col-num{text-align:right;white-space:nowrap;color:#15803d;font-weight:600}
 .col-fecha{white-space:nowrap;font-size:.75rem;color:#64748b}
@@ -715,10 +818,8 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
     <tr>
       <th>Serial</th>
       <th>Detalle</th>
+      <th>Falla reportada</th>
       <th>Trabajo realizado</th>
-      <th style="text-align:right">Gastos</th>
-      <th style="text-align:right">$ x Unidad</th>
-      <th style="text-align:right">Cant.</th>
       <th>Cliente</th>
       <th>Estado</th>
       <th>F. Recibido</th>
@@ -746,6 +847,11 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
       <div class="full">
         <label>Detalle *</label>
         <input type="text" id="f-detalle" placeholder="Ej: Tacho PLS 543"/>
+      </div>
+
+      <div class="full">
+        <label>Falla reportada</label>
+        <input type="text" id="f-falla" placeholder="Ej: No enciende, pantalla rota..."/>
       </div>
 
       <div class="full">
