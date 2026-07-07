@@ -568,20 +568,20 @@ function initApp(){
   $("btn-refresh").addEventListener("click",()=>switchTab(currentTab));
   $("f-precio").addEventListener("input",autoTotal);
   $("f-cantidad").addEventListener("input",autoTotal);
-  $("modal-rep").addEventListener("click",e=>{ if(e.target===$("modal-rep")) closeModalRep(); });
+  // Clickear afuera del modal ya NO lo cierra (para no perder datos cargados por accidente).
   // Clientes
   $("btn-new-cliente").addEventListener("click",openNewCliente);
   $("btn-import-clientes").addEventListener("click",importClientesDesdeReparaciones);
   $("btn-save-cliente").addEventListener("click",saveCliente);
   $("btn-cancel-cliente").addEventListener("click",closeModalCliente);
   $("search-clientes").addEventListener("input",filterClientes);
-  $("modal-cliente").addEventListener("click",e=>{ if(e.target===$("modal-cliente")) closeModalCliente(); });
+  // Clickear afuera del modal ya NO lo cierra.
   // Gastos
   $("btn-new-gasto").addEventListener("click",openNewGasto);
   $("btn-save-gasto").addEventListener("click",saveGasto);
   $("btn-cancel-gasto").addEventListener("click",closeModalGasto);
   $("search-gastos").addEventListener("input",filterGastos);
-  $("modal-gasto").addEventListener("click",e=>{ if(e.target===$("modal-gasto")) closeModalGasto(); });
+  // Clickear afuera del modal ya NO lo cierra.
   // Tabs
   $("tab-reparaciones").addEventListener("click",()=>switchTab("reparaciones"));
   $("tab-clientes").addEventListener("click",()=>switchTab("clientes"));
