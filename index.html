@@ -4,10 +4,11 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Reparaciones JMM</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, writeBatch }
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, writeBatch, getDoc, setDoc }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -30,6 +31,8 @@ let editingId   = null;
 let editingClienteId = null;
 let editingGastoId   = null;
 let currentTab  = "reparaciones";
+let selectedIds = new Set(); // reparaciones tildadas para presupuesto/detalle
+let negocioInfo = { nombre:"Juan Mucci - Soluciones Tecnológicas", direccion:"", telefono:"", nota:"" };
 
 // ── Helpers ───────────────────────────────────────────────
 function $(id){ return document.getElementById(id); }
@@ -75,7 +78,64 @@ function normalizePago(v){
   return v||"";
 }
 
-// ── Tabs ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════
+// ── DATOS DEL LOCAL (para encabezado de PDFs) ────────────────
+// ══════════════════════════════════════════════════════════
+async function loadNegocio(){
+  try{
+    const snap = await getDoc(doc(db,"config","negocio"));
+    if(snap.exists()) negocioInfo = { ...negocioInfo, ...snap.data() };
+  }catch(e){ /* si falla, seguimos con los valores por defecto */ }
+}
+
+function openNegocio(){
+  $("fn-nombre").value = negocioInfo.nombre||"";
+  $("fn-direccion").value = negocioInfo.direccion||"";
+  $("fn-telefono").value = negocioInfo.telefono||"";
+  $("fn-nota").value = negocioInfo.nota||"";
+  $("modal-negocio").classList.add("open");
+}
+function closeModalNegocio(){ $("modal-negocio").classList.remove("open"); }
+
+async function saveNegocio(){
+  const data = {
+    nombre: $("fn-nombre").value.trim(), direccion: $("fn-direccion").value.trim(),
+    telefono: $("fn-telefono").value.trim(), nota: $("fn-nota").value.trim(),
+  };
+  try{
+    await setDoc(doc(db,"config","negocio"), data);
+    negocioInfo = data;
+    showToast("Datos del local guardados ✔","ok");
+    closeModalNegocio();
+  }catch(e){ showToast("Error: "+e.message,"error"); }
+}
+window.openNegocio = openNegocio;
+
+// ══════════════════════════════════════════════════════════
+// ── SELECCIÓN DE REPARACIONES (para PDFs) ───────────────────
+// ══════════════════════════════════════════════════════════
+window.toggleSelect = function(id, checked){
+  if(checked) selectedIds.add(id); else selectedIds.delete(id);
+  updateSelectionUI();
+};
+window.toggleSelectAll = function(checked){
+  const rows = document.querySelectorAll(".row-check");
+  rows.forEach(cb=>{ cb.checked = checked; if(checked) selectedIds.add(cb.dataset.id); else selectedIds.delete(cb.dataset.id); });
+  updateSelectionUI();
+};
+function updateSelectionUI(){
+  const n = selectedIds.size;
+  const box = $("selection-info");
+  if(box) box.textContent = n>0 ? `${n} seleccionada(s)` : "";
+  const cbAll = $("check-all");
+  if(cbAll){
+    const rows = document.querySelectorAll(".row-check");
+    cbAll.checked = rows.length>0 && [...rows].every(cb=>cb.checked);
+  }
+}
+function getSelectedRecords(){
+  return allRecords.filter(r=>selectedIds.has(r.id));
+}
 function switchTab(tab){
   currentTab = tab;
   ["reparaciones","clientes","gastos"].forEach(t=>{
@@ -103,7 +163,7 @@ async function loadRecords(){
     if(q||est||pago) applyFilter();
   }catch(e){
     const msg=e.message||e.code||String(e);
-    $("tbody").innerHTML=`<tr><td colspan="10" style="text-align:center;padding:2rem;color:#dc2626;font-weight:600">⚠️ ${msg}</td></tr>`;
+    $("tbody").innerHTML=`<tr><td colspan="11" style="text-align:center;padding:2rem;color:#dc2626;font-weight:600">⚠️ ${msg}</td></tr>`;
     updateStats([]);
   }
   showLoading(false);
@@ -195,11 +255,12 @@ function showInlineInput(field, current, type){
 function renderTable(records){
   const tbody=$("tbody");
   tbody.innerHTML="";
-  if(!records.length){ tbody.innerHTML=`<tr><td colspan="10" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`; return; }
+  if(!records.length){ tbody.innerHTML=`<tr><td colspan="11" style="text-align:center;padding:2rem;color:#888">Sin registros</td></tr>`; return; }
   records.forEach(r=>{
     const tr=document.createElement("tr");
     const ec=(f,v)=>`onclick="editCell('${r.id}','${f}','${(v||'').toString().replace(/'/g,"&#39;")}')" title="Tocar para editar"`;
     tr.innerHTML=`
+      <td style="text-align:center" onclick="event.stopPropagation()"><input type="checkbox" class="row-check" data-id="${r.id}" ${selectedIds.has(r.id)?"checked":""} onchange="toggleSelect('${r.id}',this.checked)"/></td>
       <td class="col-serial editable" ${ec("serial",r.serial)}>${r.serial||"-"}</td>
       <td class="col-detalle editable" ${ec("detalle",r.detalle)}>${r.detalle||"-"}</td>
       <td class="col-falla editable" ${ec("falla",r.falla)}>${r.falla||"-"}</td>
@@ -217,6 +278,7 @@ function renderTable(records){
       </td>`;
     tbody.appendChild(tr);
   });
+  updateSelectionUI();
 }
 
 function updateStats(records){
@@ -314,6 +376,94 @@ function exportCSV(){
   const a=document.createElement("a");
   a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent([h.join(","),...rows].join("\n"));
   a.download="reparaciones.csv"; a.click();
+}
+
+// ══════════════════════════════════════════════════════════
+// ── PDF: PRESUPUESTO / DETALLE DE REPARACIÓN ────────────────
+// ══════════════════════════════════════════════════════════
+function wrapPdfText(pdf,text,x,y,maxWidth){
+  const lines = pdf.splitTextToSize(text,maxWidth);
+  pdf.text(lines,x,y);
+  return y + lines.length*5;
+}
+
+function generarPDF(tipo){
+  if(selectedIds.size===0){ showToast("Tildá al menos una reparación para generar el PDF","error"); return; }
+  const items = getSelectedRecords();
+  if(!items.length){ showToast("No se encontraron las reparaciones seleccionadas","error"); return; }
+  if(!window.jspdf){ showToast("No se pudo cargar la librería de PDF. Revisá tu conexión.","error"); return; }
+
+  const { jsPDF } = window.jspdf;
+  const pdf = new jsPDF({ unit:"mm", format:"a4" });
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  let y = 20;
+
+  // Encabezado con los datos del local
+  pdf.setFontSize(16); pdf.setFont(undefined,"bold");
+  pdf.text(negocioInfo.nombre||"Mi Local", 15, y); y+=7;
+  pdf.setFontSize(10); pdf.setFont(undefined,"normal"); pdf.setTextColor(80);
+  if(negocioInfo.direccion){ pdf.text(negocioInfo.direccion,15,y); y+=5; }
+  const contacto=[negocioInfo.telefono,negocioInfo.nota].filter(Boolean).join("   ·   ");
+  if(contacto){ pdf.text(contacto,15,y); y+=5; }
+  pdf.setTextColor(30);
+  y+=3; pdf.setDrawColor(180); pdf.line(15,y,pageWidth-15,y); y+=10;
+
+  // Título
+  const titulo = tipo==="presupuesto" ? "PRESUPUESTO" : (items.length>1?"DETALLE DE REPARACIONES":"DETALLE DE REPARACIÓN");
+  pdf.setFontSize(14); pdf.setFont(undefined,"bold");
+  pdf.text(titulo, 15, y);
+  pdf.setFontSize(9.5); pdf.setFont(undefined,"normal");
+  pdf.text("Fecha: "+new Date().toLocaleDateString("es-AR"), pageWidth-15, y, {align:"right"});
+  y+=8;
+
+  const clientesUnicos=[...new Set(items.map(r=>r.cliente).filter(Boolean))];
+  if(clientesUnicos.length===1){
+    pdf.setFont(undefined,"bold"); pdf.setFontSize(10.5);
+    pdf.text("Cliente: "+clientesUnicos[0], 15, y); y+=8;
+  } else { y+=2; }
+
+  let granTotal=0;
+
+  items.forEach((r,idx)=>{
+    if(y>255){ pdf.addPage(); y=20; }
+    pdf.setFillColor(245,247,250);
+    pdf.rect(15,y-5,pageWidth-30,7,"F");
+    pdf.setFont(undefined,"bold"); pdf.setFontSize(10.5); pdf.setTextColor(30);
+    pdf.text(`${idx+1}. ${r.detalle||"Equipo"}`+(r.serial?`  (N° ${r.serial})`:""), 17, y);
+    y+=7;
+    pdf.setFont(undefined,"normal"); pdf.setFontSize(9.5);
+    if(clientesUnicos.length!==1 && r.cliente){ pdf.text("Cliente: "+r.cliente, 17, y); y+=5; }
+    if(r.falla) y=wrapPdfText(pdf,"Falla reportada: "+r.falla,17,y,pageWidth-34);
+    if(tipo==="presupuesto"){
+      y=wrapPdfText(pdf,"Trabajo a realizar: "+(r.trabajo||"A definir según diagnóstico"),17,y,pageWidth-34);
+    } else {
+      if(r.trabajo) y=wrapPdfText(pdf,"Trabajo realizado: "+r.trabajo,17,y,pageWidth-34);
+      pdf.text("Estado: "+(r.estado||"-")+"     Pago: "+(r.estadoPago||"-"), 17, y); y+=5;
+      pdf.text("Recibido: "+(r.fechaRecibido||"-")+"     Retiro: "+(r.fechaRetiro||"-"), 17, y); y+=5;
+    }
+    const total = Number(r.total)||0;
+    granTotal += total;
+    pdf.setFont(undefined,"bold");
+    pdf.text("Subtotal: "+fmtMoney(total), pageWidth-17, y, {align:"right"});
+    y+=8;
+    pdf.setDrawColor(225); pdf.line(15,y-4,pageWidth-15,y-4);
+  });
+
+  if(y>265){ pdf.addPage(); y=20; }
+  y+=4;
+  pdf.setFontSize(12.5); pdf.setFont(undefined,"bold");
+  pdf.text("TOTAL: "+fmtMoney(granTotal), pageWidth-17, y, {align:"right"});
+  y+=10;
+
+  pdf.setFontSize(8.5); pdf.setFont(undefined,"italic"); pdf.setTextColor(120);
+  const leyenda = tipo==="presupuesto"
+    ? "Presupuesto sin cargo. Validez: 15 días. Los precios pueden variar según disponibilidad de repuestos."
+    : "Comprobante de detalle de reparación. Conserve este documento.";
+  pdf.text(leyenda, 15, y, {maxWidth:pageWidth-30});
+
+  const base = clientesUnicos.length===1 ? clientesUnicos[0].replace(/[^a-zA-Z0-9]+/g,"_") : "reparaciones";
+  pdf.save((tipo==="presupuesto"?"presupuesto_":"detalle_")+base+".pdf");
+  showToast("PDF generado ✔","ok");
 }
 
 // ══════════════════════════════════════════════════════════
@@ -558,6 +708,7 @@ function doLogin(){
 
 function initApp(){
   loadRecords();
+  loadNegocio();
   $("search").addEventListener("input",applyFilter);
   $("filter-estado").addEventListener("change",applyFilter);
   $("filter-pago").addEventListener("change",applyFilter);
@@ -565,10 +716,16 @@ function initApp(){
   $("btn-save-rep").addEventListener("click",saveRecord);
   $("btn-cancel-rep").addEventListener("click",closeModalRep);
   $("btn-export").addEventListener("click",exportCSV);
+  $("btn-pdf-presupuesto").addEventListener("click",()=>generarPDF("presupuesto"));
+  $("btn-pdf-detalle").addEventListener("click",()=>generarPDF("detalle"));
   $("btn-refresh").addEventListener("click",()=>switchTab(currentTab));
   $("f-precio").addEventListener("input",autoTotal);
   $("f-cantidad").addEventListener("input",autoTotal);
   // Clickear afuera del modal ya NO lo cierra (para no perder datos cargados por accidente).
+  // Mis datos (negocio)
+  $("btn-negocio").addEventListener("click",openNegocio);
+  $("btn-save-negocio").addEventListener("click",saveNegocio);
+  $("btn-cancel-negocio").addEventListener("click",closeModalNegocio);
   // Clientes
   $("btn-new-cliente").addEventListener("click",openNewCliente);
   $("btn-import-clientes").addEventListener("click",importClientesDesdeReparaciones);
@@ -769,6 +926,7 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
   </h1>
   <div style="display:flex;gap:.5rem;flex-wrap:wrap">
     <button class="btn btn-outline" id="btn-refresh">🔄 Actualizar</button>
+    <button class="btn btn-outline" id="btn-negocio">🏪 Mis Datos</button>
     <button class="btn btn-success" id="btn-new">+ Nueva Reparación</button>
     <button class="btn" id="btn-logout" style="background:#7f1d1d;color:#fca5a5;border:none">🚪 Salir</button>
   </div>
@@ -801,10 +959,14 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
       <option value="PAGADO">PAGADO</option><option value="Pendiente">Pendiente</option>
     </select>
     <button class="btn btn-outline" id="btn-export">📥 CSV</button>
+    <span id="selection-info" style="font-size:.85rem;color:#2563eb;font-weight:700;margin-left:.3rem"></span>
+    <button class="btn btn-outline" id="btn-pdf-presupuesto" title="Genera un PDF de presupuesto con las reparaciones tildadas">💰 Presupuesto PDF</button>
+    <button class="btn btn-outline" id="btn-pdf-detalle" title="Genera un PDF de detalle/comprobante con las reparaciones tildadas">🧾 Detalle PDF</button>
   </div>
   <div class="table-wrap">
     <table>
       <thead><tr>
+        <th style="text-align:center"><input type="checkbox" id="check-all" onchange="toggleSelectAll(this.checked)"/></th>
         <th>Serial</th><th>Detalle</th><th>Falla reportada</th><th>Trabajo realizado</th>
         <th>Cliente</th><th>Estado</th><th>F. Recibido</th><th>F. Retiro</th>
         <th>Estado Pago</th><th style="text-align:right">Total</th><th></th>
@@ -926,6 +1088,25 @@ label{display:block;font-size:.72rem;color:#64748b;margin-bottom:.2rem;font-weig
     <div class="modal-actions">
       <button class="btn btn-outline" id="btn-cancel-gasto">Cancelar</button>
       <button class="btn btn-primary" id="btn-save-gasto">💾 Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Datos del local -->
+<div class="modal-overlay" id="modal-negocio">
+  <div class="modal-box">
+    <h2>🏪 Datos de mi local</h2>
+    <p style="font-size:.85rem;color:#64748b;margin-top:-.5rem;margin-bottom:1rem">Esto aparece como encabezado en los PDFs de presupuesto y detalle que le mandás a tus clientes.</p>
+    <div class="form-grid">
+      <div class="full"><label>Nombre del local *</label><input type="text" id="fn-nombre" placeholder="Ej: Juan Mucci - Soluciones Tecnológicas"/></div>
+      <div class="full"><label>Dirección</label><input type="text" id="fn-direccion" placeholder="Calle y número, ciudad"/></div>
+      <div><label>Teléfono</label><input type="text" id="fn-telefono" placeholder="Ej: 3404-123456"/></div>
+      <div></div>
+      <div class="full"><label>Email / Instagram / otro dato</label><input type="text" id="fn-nota" placeholder="Ej: @jmm.reparaciones · correo@ejemplo.com"/></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" id="btn-cancel-negocio">Cancelar</button>
+      <button class="btn btn-primary" id="btn-save-negocio">💾 Guardar</button>
     </div>
   </div>
 </div>
