@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Reparaciones JMM</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.min.js"></script>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
@@ -369,32 +369,38 @@ function renderDashboard(){
     const m=mesMap.get(key); if(m) m.gastos += (Number(g.monto)||0)*(Number(g.cantidad)||1);
   });
 
-  const ctxIng = $("chart-ingresos").getContext("2d");
-  if(chartIngresos) chartIngresos.destroy();
-  chartIngresos = new Chart(ctxIng,{
-    type:"bar",
-    data:{
-      labels: meses.map(m=>m.label),
-      datasets:[
-        { label:"Ingresos", data: meses.map(m=>m.ingresos), backgroundColor:"#2563eb" },
-        { label:"Gastos",   data: meses.map(m=>m.gastos),   backgroundColor:"#dc2626" },
-      ]
-    },
-    options:{ responsive:true, maintainAspectRatio:false, scales:{ y:{ beginAtZero:true } } }
-  });
+  // Los gráficos dependen de que la librería Chart.js haya cargado bien desde
+  // la CDN; si por lo que sea falla (sin internet, bloqueada, etc.) no debe
+  // tumbar el resto de la app (tabla, botones), así que va todo en try/catch.
+  try{
+    if(typeof Chart==="undefined") throw new Error("Chart.js no cargó");
+    const ctxIng = $("chart-ingresos").getContext("2d");
+    if(chartIngresos) chartIngresos.destroy();
+    chartIngresos = new Chart(ctxIng,{
+      type:"bar",
+      data:{
+        labels: meses.map(m=>m.label),
+        datasets:[
+          { label:"Ingresos", data: meses.map(m=>m.ingresos), backgroundColor:"#2563eb" },
+          { label:"Gastos",   data: meses.map(m=>m.gastos),   backgroundColor:"#dc2626" },
+        ]
+      },
+      options:{ responsive:true, maintainAspectRatio:false, scales:{ y:{ beginAtZero:true } } }
+    });
 
-  const estados=["Retirado","Reparado","Pendiente","No acepto presupuesto","-"];
-  const counts = estados.map(e=>allRecords.filter(r=>(r.estado||"-")===e).length);
-  const ctxEst = $("chart-estados").getContext("2d");
-  if(chartEstados) chartEstados.destroy();
-  chartEstados = new Chart(ctxEst,{
-    type:"doughnut",
-    data:{
-      labels: estados,
-      datasets:[{ data: counts, backgroundColor:["#1d4ed8","#16a34a","#a16207","#dc2626","#94a3b8"] }]
-    },
-    options:{ responsive:true, maintainAspectRatio:false }
-  });
+    const estados=["Retirado","Reparado","Pendiente","No acepto presupuesto","-"];
+    const counts = estados.map(e=>allRecords.filter(r=>(r.estado||"-")===e).length);
+    const ctxEst = $("chart-estados").getContext("2d");
+    if(chartEstados) chartEstados.destroy();
+    chartEstados = new Chart(ctxEst,{
+      type:"doughnut",
+      data:{
+        labels: estados,
+        datasets:[{ data: counts, backgroundColor:["#1d4ed8","#16a34a","#a16207","#dc2626","#94a3b8"] }]
+      },
+      options:{ responsive:true, maintainAspectRatio:false }
+    });
+  }catch(e){ console.error("No se pudieron dibujar los gráficos del dashboard:",e); }
 }
 
 window.setSort = function(field){
